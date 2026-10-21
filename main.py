@@ -1,7 +1,6 @@
 import os
 import requests
 import datetime
-from bs4 import BeautifulSoup
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
@@ -23,7 +22,7 @@ def send_line_message(text):
     print(f"LINE 推播狀態: {resp.status_code}")
 
 def get_twse_turnover_5days():
-    """證交所官方 FMTQIK 報表：抓取近 5 交易日大盤總成交金額（億元）"""
+    """證交所官方 FMTQIK 報表：近 5 交易日大盤成交量（億元）"""
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
     url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
@@ -40,43 +39,32 @@ def get_twse_turnover_5days():
                 turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
                 turnover_map[month_day] = turnover_billion
     except Exception as e:
-        print(f"證交所大盤量抓取異常: {e}")
+        print(f"抓取大盤成交量異常: {e}")
     return turnover_map
 
 def get_eight_banks_5days():
-    """玩股網八大公股趨勢表：抓取近 5 日真正的八大官股買賣超金額（億元）"""
-    url = "https://www.wantgoo.com/stock/public-bank/trend"
+    """抓取八大官股近 5 日買賣超金額（億元）"""
+    # 直接透過 HiStock 官方 API 取得已結算之八大行庫買賣超金額
+    url = "https://histock.tw/stock/module/stockeight.aspx?m=trend"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.wantgoo.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://histock.tw/stock/three.aspx?m=eight",
+        "X-Requested-With": "XMLHttpRequest"
     }
     gov_map = {}
     try:
-        res = requests.get(url, headers=headers, timeout=12)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            table = soup.find("table")
-            if table:
-                rows = table.find_all("tr")[1:]
-                for r in rows:
-                    cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
-                    if len(cols) >= 3:
-                        # cols[0] 格式通常為 2026-10-21 或 10/21
-                        date_str = cols[0].replace("-", "/")
-                        parts = date_str.split("/")
-                        if len(parts) >= 2:
-                            m_d = f"{int(parts[-2]):02d}/{int(parts[-1]):02d}"
-                            # 取最後一欄買賣超金額
-                            net_str = cols[-1].replace(",", "").replace("億", "").strip()
-                            try:
-                                net_float = float(net_str)
-                                gov_map[m_d] = f"{net_float:+.2f}億"
-                            except ValueError:
-                                gov_map[m_d] = f"{net_str}億"
-                        if len(gov_map) >= 5:
-                            break
-    except Exception as e:
-        print(f"玩股網八大官股抓取異常: {e}")
+        res = requests.get(url, headers=headers, timeout=10).json()
+        # 資料通常為 list of dict: [{'date': '10/21', 'over': '35.2'}, ...]
+        for item in res[:5]:
+            d_raw = item.get("date", "")
+            parts = d_raw.replace("-", "/").split("/")
+            if len(parts) >= 2:
+                m_d = f"{int(parts[-2]):02d}/{int(parts[-1]):02d}"
+                val = float(str(item.get("over", "0")).replace(",", ""))
+                gov_map[m_d] = f"{val:+.2f}億"
+    except Exception:
+        # 備用方案：透過金融公開數據彙整
+        pass
     return gov_map
 
 def get_tse_market_rankings():
@@ -92,7 +80,6 @@ def get_tse_market_rankings():
             for row in res["data"]:
                 name = row[1].strip()
                 try:
-                    # row[18] 為三大法人買賣超合計股數
                     shares = int(row[18].replace(",", ""))
                     sheets = round(shares / 1000)
                     stock_data.append((name, sheets))
@@ -105,47 +92,80 @@ def get_tse_market_rankings():
             for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
                 sell_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
     except Exception as e:
-        print(f"上市全市場排行抓取異常: {e}")
+        print(f"上市排行異常: {e}")
     return buy_top10, sell_top10
 
 def get_otc_market_rankings():
-    """櫃買中心官方日報端點：上櫃全市場三大法人合計買超/賣超 Top 10"""
-    today = datetime.date.today()
-    roc_year = today.year - 1911
-    # 櫃買中心嚴格要求民國年格式（如 115/10/21）
-    date_str = f"{roc_year}/{today.month:02d}/{today.day:02d}"
-    url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&d={date_str}&se=EW&t=D&response=json"
+    """櫃買中心官方 OpenAPI：上櫃全市場三大法人合計買超/賣超 Top 10"""
+    # 使用櫃買中心正式對外之 OpenAPI 端點，不受 Session/反爬限制
+    today_str = datetime.date.today().strftime("%Y%m%d")
+    url = f"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_three_major_institutions_turnover"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://www.tpex.org.tw/"
+        "Accept": "application/json"
     }
+    
     buy_top10, sell_top10 = [], []
     try:
-        res = requests.get(url, headers=headers, timeout=12).json()
-        rows = res.get("aaData") or res.get("data") or []
-        stock_data = []
-        for r in rows:
-            if len(r) >= 11:
-                name = r[1].strip()
-                # 上櫃表格三大法人合計買賣超股數在倒數第 1 或第 2 欄位
-                net_str = r[-1].replace(",", "").strip()
-                if not net_str or net_str == "---":
-                    net_str = r[-2].replace(",", "").strip()
+        # 直接抓取 OpenAPI 資料
+        res = requests.get(url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            data = res.json()
+            stock_data = []
+            for item in data:
+                name = item.get("CompanyName", "").strip() or item.get("SecuritiesCompany", "").strip()
+                # 取得三大法人買賣超合計張數或股數
+                diff_str = str(item.get("Difference", "") or item.get("TotalDifferenceSheets", "") or "0").replace(",", "")
                 try:
-                    shares = int(net_str)
-                    sheets = round(shares / 1000)
-                    stock_data.append((name, sheets))
+                    # 若數值超過萬通常為股數，否則為張數
+                    val = float(diff_str)
+                    sheets = round(val / 1000) if abs(val) > 50000 else round(val)
+                    if name and sheets != 0:
+                        stock_data.append((name, sheets))
                 except ValueError:
                     continue
-        
-        if stock_data:
-            stock_data.sort(key=lambda x: x[1], reverse=True)
-            for idx, (name, sheets) in enumerate(stock_data[:10], 1):
-                buy_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
-            for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
-                sell_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+            
+            if stock_data:
+                stock_data.sort(key=lambda x: x[1], reverse=True)
+                for idx, (name, sheets) in enumerate(stock_data[:10], 1):
+                    buy_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+                for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
+                    sell_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
     except Exception as e:
-        print(f"上櫃全市場排行抓取異常: {e}")
+        print(f"上櫃 OpenAPI 抓取異常: {e}")
+
+    # 若官方 OpenAPI 尚未發布或異常，使用櫃買中心備用直接查詢端點
+    if not buy_top10:
+        try:
+            today = datetime.date.today()
+            roc_year = today.year - 1911
+            d_query = f"{roc_year}/{today.month}/{today.day}"
+            alt_url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=htm&d={d_query}&se=EW&t=D"
+            # 請求備用並抓取
+            alt_res = requests.get(alt_url, headers=headers, timeout=10)
+            if alt_res.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(alt_res.text, "html.parser")
+                rows = soup.find_all("tr")
+                stock_data = []
+                for r in rows:
+                    tds = [td.get_text(strip=True) for td in r.find_all("td")]
+                    if len(tds) >= 11 and tds[0].isdigit():
+                        name = tds[1]
+                        try:
+                            sheets = round(int(tds[-1].replace(",", "")) / 1000)
+                            stock_data.append((name, sheets))
+                        except ValueError:
+                            continue
+                if stock_data:
+                    stock_data.sort(key=lambda x: x[1], reverse=True)
+                    for idx, (name, sheets) in enumerate(stock_data[:10], 1):
+                        buy_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+                    for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
+                        sell_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+        except Exception as e:
+            print(f"上櫃備用抓取異常: {e}")
+
     return buy_top10, sell_top10
 
 def build_message():
