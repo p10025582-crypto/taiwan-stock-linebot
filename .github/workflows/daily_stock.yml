@@ -1,29 +1,106 @@
-name: Daily Stock Push
+import os
+import requests
+import datetime
+from bs4 import BeautifulSoup
 
-on:
-  schedule:
-    # UTC 09:30 對應台灣時間 17:30（週一至週五）
-    - cron: '30 9 * * 1-5'
-  workflow_dispatch: # 支援手動隨時測試按鈕
+LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
-jobs:
-  run-script:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+def send_line_message(text):
+    if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
+        print("未設定 LINE 金鑰或 User ID")
+        return
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+    }
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": text}]
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    print(f"LINE 推播狀態: {resp.status_code}")
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+def get_recent_5_days_twse():
+    """向證交所抓取最近 5 個有開盤交易日的大盤成交量"""
+    records = {}
+    current_date = datetime.date.today()
+    checked = 0
+    
+    while len(records) < 5 and checked < 15:
+        d_str = current_date.strftime("%Y%m%d")
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={d_str}&type=MS&response=json"
+        try:
+            res = requests.get(url, timeout=8).json()
+            if res.get("stat") == "OK" and res.get("tables"):
+                val = res["tables"][0]["data"][0][1].replace(",", "")
+                records[current_date.strftime("%m/%d")] = round(float(val) / 100000000, 1)
+        except Exception:
+            pass
+        current_date -= datetime.timedelta(days=1)
+        checked += 1
+    return records
 
-      - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4
+def get_eight_banks_5_days():
+    """抓取公開資訊站近 5 日八大官股買賣超金額"""
+    url = "https://histock.tw/stock/three.aspx?m=eight"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    gov_records = []
+    try:
+        res = requests.get(url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            table = soup.find("table", class_="gvTB")
+            if table:
+                rows = table.find_all("tr")
+                for r in rows[1:]: # 跳過表頭
+                    cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
+                    if len(cols) >= 3:
+                        # 格式通常為：日期、買進、賣出、買賣超
+                        date_text = cols[0]
+                        net_val = cols[-1] # 最後一欄通常為買賣超金額
+                        gov_records.append({"date": date_text, "net": net_val})
+                        if len(gov_records) >= 5:
+                            break
+    except Exception as e:
+        print(f"八大官股解析異常: {e}")
+    return gov_records
 
-      - name: Run script
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: python main.py
+def build_message():
+    twse_dict = get_recent_5_days_twse()
+    gov_list = get_eight_banks_5_days()
+    today_display = datetime.date.today().strftime("%Y/%m/%d")
+
+    msg = f"🏛️ 【近5日八大官股與大盤籌碼】\n"
+    msg += f"結算基準日：{today_display}\n"
+    msg += "─" * 22 + "\n"
+    msg += " 日期      官股買賣超    大盤成交量\n"
+
+    # 若順利抓到官股歷史表
+    if gov_list:
+        for item in gov_list:
+            d = item["date"]
+            net = item["net"]
+            # 比對大盤成交量
+            t_val = "──"
+            for k in twse_dict:
+                if k in d:
+                    t_val = f"{twse_dict[k]}億"
+                    break
+            msg += f"{d:<8} {net:>10}  {t_val:>9}\n"
+    else:
+        # 備用顯示模式：以證交所 5 日數據呈現
+        for d, val in twse_dict.items():
+            msg += f"{d:<8} (請對照連結)   {val}億\n"
+
+    msg += "─" * 22 + "\n"
+    msg += "🔗 公開即時明細與買賣超排行：\n"
+    msg += "https://histock.tw/stock/three.aspx?m=eight"
+    return msg
+
+if __name__ == "__main__":
+    msg = build_message()
+    send_line_message(msg)
