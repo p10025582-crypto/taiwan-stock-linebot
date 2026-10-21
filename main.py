@@ -22,122 +22,152 @@ def send_line_message(text):
     resp = requests.post(url, headers=headers, json=payload)
     print(f"LINE 推播狀態: {resp.status_code}")
 
-def get_recent_5_days_twse():
-    """抓取證交所近 5 日大盤成交量"""
-    records = {}
-    current_date = datetime.date.today()
-    checked = 0
-    while len(records) < 5 and checked < 15:
-        d_str = current_date.strftime("%Y%m%d")
-        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={d_str}&type=MS&response=json"
-        try:
-            res = requests.get(url, timeout=8).json()
-            if res.get("stat") == "OK" and res.get("tables"):
-                val = res["tables"][0]["data"][0][1].replace(",", "")
-                records[current_date.strftime("%m/%d")] = round(float(val) / 100000000, 1)
-        except Exception:
-            pass
-        current_date -= datetime.timedelta(days=1)
-        checked += 1
-    return records
-
-def get_histock_page(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+def get_twse_turnover_5days():
+    """從證交所官方抓取近 5 個交易日的大盤成交金額（億元）"""
+    today = datetime.date.today()
+    date_str = today.strftime("%Y%m%d")
+    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    turnover_map = {}
     try:
-        res = requests.get(url, headers=headers, timeout=12)
-        if res.status_code == 200:
-            return BeautifulSoup(res.text, "html.parser")
+        res = requests.get(url, headers=headers, timeout=10).json()
+        if res.get("stat") == "OK" and "data" in res:
+            recent_rows = res["data"][-5:]
+            recent_rows.reverse()
+            for row in recent_rows:
+                d_parts = row[0].split('/')
+                month_day = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
+                turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
+                turnover_map[month_day] = turnover_billion
     except Exception as e:
-        print(f"抓取失敗 {url}: {e}")
-    return None
+        print(f"抓取大盤成交量異常: {e}")
+    return turnover_map
 
-def parse_rankings(soup, is_otc=False):
-    """解析買超與賣超前 10 大個股及張數"""
-    buy_list = []
-    sell_list = []
-    if not soup:
-        return buy_list, sell_list
+def get_eight_banks_5days():
+    """抓取玩股網八大官股近 5 日買賣超金額"""
+    url = "https://www.wantgoo.com/stock/public-bank/trend"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.wantgoo.com/"
+    }
+    daily_records = []
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            table = soup.find("table")
+            if table:
+                rows = table.find_all("tr")[1:6]
+                for r in rows:
+                    cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
+                    if len(cols) >= 3:
+                        d_str = cols[0].replace("-", "/")
+                        parts = d_str.split("/")
+                        m_d = f"{int(parts[1]):02d}/{int(parts[2]):02d}" if len(parts) >= 3 else cols[0]
+                        daily_records.append((m_d, cols[-1]))
+    except Exception as e:
+        print(f"官股金額抓取異常: {e}")
+    return daily_records
 
-    tables = soup.find_all("table", class_="gvTB")
-    for table in tables:
-        rows = table.find_all("tr")
-        for r in rows:
-            cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
-            if len(cols) >= 5 and cols[0].isdigit() and len(cols[0]) >= 4:
-                stock_name = cols[1]
-                net_vol = cols[4].replace(",", "")
+def get_tse_market_rankings():
+    """從證交所官方 API 抓取全市場上市三大法人買超/賣超 Top 10"""
+    today_str = datetime.date.today().strftime("%Y%m%d")
+    url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={today_str}&selectType=ALL&response=json"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    buy_top10, sell_top10 = [], []
+    try:
+        res = requests.get(url, headers=headers, timeout=12).json()
+        if res.get("stat") == "OK" and "data" in res:
+            stock_data = []
+            for row in res["data"]:
+                code = row[0].strip()
+                name = row[1].strip()
+                # row[18] 是三大法人合計買賣超股數
                 try:
-                    vol_int = int(net_vol)
-                    if vol_int > 0 and len(buy_list) < 10:
-                        buy_list.append(f"{stock_name} ({vol_int:+,}張)")
-                    elif vol_int < 0 and len(sell_list) < 10:
-                        sell_list.append(f"{stock_name} ({vol_int:+,}張)")
-                except ValueError:
+                    shares = int(row[18].replace(",", ""))
+                    sheets = round(shares / 1000)
+                    stock_data.append((name, sheets))
+                except (ValueError, IndexError):
                     continue
-    return buy_list, sell_list
+            
+            # 依張數排序
+            stock_data.sort(key=lambda x: x[1], reverse=True)
+            for name, sheets in stock_data[:10]:
+                buy_top10.append(f"{name} ({sheets:+,}張)")
+            for name, sheets in stock_data[-10:][::-1]:
+                sell_top10.append(f"{name} ({sheets:+,}張)")
+    except Exception as e:
+        print(f"上市全市場排行抓取異常: {e}")
+    return buy_top10, sell_top10
 
-def get_eight_banks_summary(soup):
-    """解析近 5 日官股買賣超總額"""
-    records = []
-    if not soup:
-        return records
-    table = soup.find("table", class_="gvTB")
-    if table:
-        for r in table.find_all("tr")[1:]:
-            cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
-            if len(cols) >= 3:
-                records.append({"date": cols[0], "net": cols[-1]})
-                if len(records) >= 5:
-                    break
-    return records
+def get_otc_market_rankings():
+    """從櫃買中心官方 API 抓取全市場上櫃三大法人買超/賣超 Top 10"""
+    today = datetime.date.today()
+    roc_year = today.year - 1911
+    date_str = f"{roc_year}/{today.strftime('%m/%d')}"
+    url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&d={date_str}&se=EW&t=D&response=json"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    buy_top10, sell_top10 = [], []
+    try:
+        res = requests.get(url, headers=headers, timeout=12).json()
+        if "aaData" in res and res["aaData"]:
+            stock_data = []
+            for row in res["aaData"]:
+                code = row[0].strip()
+                name = row[1].strip()
+                # row[10] 或 row[13] 是上櫃三大法人合計買賣超股數
+                try:
+                    shares = int(row[10].replace(",", ""))
+                    sheets = round(shares / 1000)
+                    stock_data.append((name, sheets))
+                except (ValueError, IndexError):
+                    continue
+            
+            stock_data.sort(key=lambda x: x[1], reverse=True)
+            for name, sheets in stock_data[:10]:
+                buy_top10.append(f"{name} ({sheets:+,}張)")
+            for name, sheets in stock_data[-10:][::-1]:
+                sell_top10.append(f"{name} ({sheets:+,}張)")
+    except Exception as e:
+        print(f"上櫃全市場排行抓取異常: {e}")
+    return buy_top10, sell_top10
 
 def build_message():
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    
-    soup_tse = get_histock_page("https://histock.tw/stock/three.aspx?m=eight")
-    soup_otc = get_histock_page("https://histock.tw/stock/three.aspx?m=eight&s=otc")
-    
-    twse_dict = get_recent_5_days_twse()
-    gov_5days = get_eight_banks_summary(soup_tse)
-    
-    tse_buy, tse_sell = parse_rankings(soup_tse, is_otc=False)
-    otc_buy, otc_sell = parse_rankings(soup_otc, is_otc=True)
+    twse_map = get_twse_turnover_5days()
+    daily_gov = get_eight_banks_5days()
+    tse_buy, tse_sell = get_tse_market_rankings()
+    otc_buy, otc_sell = get_otc_market_rankings()
 
-    msg = f"🏛️ 【八大官股動向彙整】\n"
+    msg = f"📊 【台股盤後籌碼總覽】\n"
     msg += f"📅 日期：{today_str}\n\n"
 
-    msg += "📊 【近5日大盤與官股總額】\n"
-    msg += "─" * 20 + "\n"
-    if gov_5days:
-        for item in gov_5days:
-            d = item["date"]
-            net = item["net"]
-            t_val = "──"
-            for k in twse_dict:
-                if k in d:
-                    t_val = f"{twse_dict[k]}億"
-                    break
-            msg += f"{d:<7} 官股:{net:>8} | 大盤:{t_val}\n"
-    else:
-        for d, val in twse_dict.items():
-            msg += f"{d:<7} 大盤量: {val}億\n"
-    msg += "─" * 20 + "\n\n"
+    # --- 近5日大盤量與官股總額 ---
+    msg += "🏛️ 【近5日大盤量與官股動向】\n"
+    msg += "─" * 22 + "\n"
+    for d, turnover in twse_map.items():
+        gov_net = "已結算"
+        for g_d, g_val in daily_gov:
+            if d in g_d:
+                gov_net = g_val
+                break
+        msg += f"{d}  大盤:{turnover:>7.1f}億 | 官股:{gov_net}\n"
+    msg += "─" * 22 + "\n\n"
 
-    msg += "📈 【上市官股買超 Top 10】\n"
-    msg += ("\n".join(tse_buy) if tse_buy else "資料結算中或未取得") + "\n\n"
-    
-    msg += "📉 【上市官股賣超 Top 10】\n"
-    msg += ("\n".join(tse_sell) if tse_sell else "資料結算中或未取得") + "\n\n"
+    # --- 上市全市場三大法人排行 ---
+    msg += "📈 【上市三大法人買超 Top 10】\n"
+    msg += ("\n".join(tse_buy) if tse_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📈 【上櫃官股買超 Top 10】\n"
-    msg += ("\n".join(otc_buy) if otc_buy else "資料結算中或未取得") + "\n\n"
+    msg += "📉 【上市三大法人賣超 Top 10】\n"
+    msg += ("\n".join(tse_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉 【上櫃官股賣超 Top 10】\n"
-    msg += ("\n".join(otc_sell) if otc_sell else "資料結算中或未取得") + "\n\n"
+    # --- 上櫃全市場三大法人排行 ---
+    msg += "📈 【上櫃三大法人買超 Top 10】\n"
+    msg += ("\n".join(otc_buy) if otc_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "🔗 明細查驗：https://histock.tw/stock/three.aspx?m=eight"
+    msg += "📉 【上櫃三大法人賣超 Top 10】\n"
+    msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中")
+
     return msg
 
 if __name__ == "__main__":
