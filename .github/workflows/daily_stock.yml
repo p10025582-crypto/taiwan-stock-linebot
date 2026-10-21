@@ -1,0 +1,29 @@
+name: Daily Stock Push
+
+on:
+  schedule:
+    # UTC 09:30 對應台灣時間 17:30（週一至週五）
+    - cron: '30 9 * * 1-5'
+  workflow_dispatch: # 支援手動隨時測試按鈕
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run script
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python main.py
