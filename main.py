@@ -1,6 +1,7 @@
 import os
 import requests
 import datetime
+from bs4 import BeautifulSoup
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
@@ -21,62 +22,124 @@ def send_line_message(text):
     resp = requests.post(url, headers=headers, json=payload)
     print(f"LINE 推播狀態: {resp.status_code}")
 
-def get_recent_5_days_data():
-    records = []
+def get_recent_5_days_twse():
+    """抓取證交所近 5 日大盤成交量"""
+    records = {}
     current_date = datetime.date.today()
-    checked_days = 0
-    
-    # 往前找最多 15 天，湊齊最近 5 個有開盤交易的資料
-    while len(records) < 5 and checked_days < 15:
-        date_str = current_date.strftime("%Y%m%d")
-        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=MS&response=json"
-        
+    checked = 0
+    while len(records) < 5 and checked < 15:
+        d_str = current_date.strftime("%Y%m%d")
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={d_str}&type=MS&response=json"
         try:
-            res = requests.get(url, timeout=10).json()
+            res = requests.get(url, timeout=8).json()
             if res.get("stat") == "OK" and res.get("tables"):
-                table = res["tables"][0]
-                # 取得大盤成交金額 (元)
-                total_val = table["data"][0][1].replace(",", "")
-                total_billion = round(float(total_val) / 100000000, 1)
-                
-                date_display = current_date.strftime("%m/%d")
-                weekday_tw = ["一", "二", "三", "四", "五", "六", "日"][current_date.weekday()]
-                
-                records.append({
-                    "date": f"{date_display}({weekday_tw})",
-                    "turnover": total_billion
-                })
+                val = res["tables"][0]["data"][0][1].replace(",", "")
+                records[current_date.strftime("%m/%d")] = round(float(val) / 100000000, 1)
         except Exception:
             pass
-        
         current_date -= datetime.timedelta(days=1)
-        checked_days += 1
-        
+        checked += 1
+    return records
+
+def get_histock_page(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            return BeautifulSoup(res.text, "html.parser")
+    except Exception as e:
+        print(f"抓取失敗 {url}: {e}")
+    return None
+
+def parse_rankings(soup, is_otc=False):
+    """解析買超與賣超前 10 大個股及張數"""
+    buy_list = []
+    sell_list = []
+    if not soup:
+        return buy_list, sell_list
+
+    tables = soup.find_all("table", class_="gvTB")
+    for table in tables:
+        rows = table.find_all("tr")
+        for r in rows:
+            cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
+            if len(cols) >= 5 and cols[0].isdigit() and len(cols[0]) >= 4:
+                stock_name = cols[1]
+                net_vol = cols[4].replace(",", "")
+                try:
+                    vol_int = int(net_vol)
+                    if vol_int > 0 and len(buy_list) < 10:
+                        buy_list.append(f"{stock_name} ({vol_int:+,}張)")
+                    elif vol_int < 0 and len(sell_list) < 10:
+                        sell_list.append(f"{stock_name} ({vol_int:+,}張)")
+                except ValueError:
+                    continue
+    return buy_list, sell_list
+
+def get_eight_banks_summary(soup):
+    """解析近 5 日官股買賣超總額"""
+    records = []
+    if not soup:
+        return records
+    table = soup.find("table", class_="gvTB")
+    if table:
+        for r in table.find_all("tr")[1:]:
+            cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
+            if len(cols) >= 3:
+                records.append({"date": cols[0], "net": cols[-1]})
+                if len(records) >= 5:
+                    break
     return records
 
 def build_message():
-    data = get_recent_5_days_data()
-    if not data:
-        return "【台股盤後籌碼】\n今日非交易日，或證交所盤後資料尚未產出。"
+    today_str = datetime.date.today().strftime("%Y/%m/%d")
     
-    msg = "📊 【近5日大盤成交量與官股速算】\n"
-    msg += "─" * 16 + "\n"
-    msg += "日期       大盤成交量   比重1%金額\n"
+    soup_tse = get_histock_page("https://histock.tw/stock/three.aspx?m=eight")
+    soup_otc = get_histock_page("https://histock.tw/stock/three.aspx?m=eight&s=otc")
     
-    for r in data:
-        # 每 1% 對應的買超金額（億元）
-        val_1pct = round(r["turnover"] * 0.01, 2)
-        msg += f"{r['date']}   {r['turnover']:>7.1f}億   約 {val_1pct:>5.2f}億\n"
+    twse_dict = get_recent_5_days_twse()
+    gov_5days = get_eight_banks_summary(soup_tse)
     
-    msg += "─" * 16 + "\n"
-    msg += "💡 換算範例：\n"
-    msg += "若今日官股買賣超比重為 +0.52%\n"
-    latest_val = data[0]["turnover"]
-    calc_val = round(latest_val * 0.0052, 2)
-    msg += f"👉 換算買超 ＝ {latest_val}億 × 0.52% ≒ {calc_val} 億元"
+    tse_buy, tse_sell = parse_rankings(soup_tse, is_otc=False)
+    otc_buy, otc_sell = parse_rankings(soup_otc, is_otc=True)
+
+    msg = f"🏛️ 【八大官股動向彙整】\n"
+    msg += f"📅 日期：{today_str}\n\n"
+
+    msg += "📊 【近5日大盤與官股總額】\n"
+    msg += "─" * 20 + "\n"
+    if gov_5days:
+        for item in gov_5days:
+            d = item["date"]
+            net = item["net"]
+            t_val = "──"
+            for k in twse_dict:
+                if k in d:
+                    t_val = f"{twse_dict[k]}億"
+                    break
+            msg += f"{d:<7} 官股:{net:>8} | 大盤:{t_val}\n"
+    else:
+        for d, val in twse_dict.items():
+            msg += f"{d:<7} 大盤量: {val}億\n"
+    msg += "─" * 20 + "\n\n"
+
+    msg += "📈 【上市官股買超 Top 10】\n"
+    msg += ("\n".join(tse_buy) if tse_buy else "資料結算中或未取得") + "\n\n"
     
+    msg += "📉 【上市官股賣超 Top 10】\n"
+    msg += ("\n".join(tse_sell) if tse_sell else "資料結算中或未取得") + "\n\n"
+
+    msg += "📈 【上櫃官股買超 Top 10】\n"
+    msg += ("\n".join(otc_buy) if otc_buy else "資料結算中或未取得") + "\n\n"
+
+    msg += "📉 【上櫃官股賣超 Top 10】\n"
+    msg += ("\n".join(otc_sell) if otc_sell else "資料結算中或未取得") + "\n\n"
+
+    msg += "🔗 明細查驗：https://histock.tw/stock/three.aspx?m=eight"
     return msg
 
 if __name__ == "__main__":
-    message = build_message()
-    send_line_message(message)
+    content = build_message()
+    send_line_message(content)
