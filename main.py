@@ -1,7 +1,6 @@
 import os
 import requests
 import datetime
-import time
 from bs4 import BeautifulSoup
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
@@ -28,63 +27,70 @@ def get_twse_turnover_5days():
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
     url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     turnover_map = {}
-    twse_dates = []
+    twse_days_list = []
     try:
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res:
             recent_rows = res["data"][-5:]
             recent_rows.reverse()
             for row in recent_rows:
-                # row[0] 格式為 '115/10/21'
+                # row[0] 格式如 '115/10/21'
                 d_parts = row[0].split('/')
-                roc_y = int(d_parts[0])
-                month = int(d_parts[1])
-                day = int(d_parts[2])
-                ad_y = roc_y + 1911
-                ad_date_str = f"{ad_y}{month:02d}{day:02d}"
-                m_d = f"{month:02d}/{day:02d}"
+                m_d = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
                 turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
                 turnover_map[m_d] = turnover_billion
-                twse_dates.append((m_d, ad_date_str))
+                twse_days_list.append(m_d)
     except Exception as e:
-        print(f"抓取大盤成交量異常: {e}")
-    return turnover_map, twse_dates
+        print(f"大盤成交量抓取異常: {e}")
+    return turnover_map, twse_days_list
 
-def get_three_institutions_5days(twse_dates):
-    """逐日查詢三大法人合計買賣超，並加入間隔與防快取標頭"""
+def get_three_institutions_histock_5days():
+    """從 HiStock 的『近三十日上市三大法人買賣超』表格抓取總計（億元）"""
+    url = "https://histock.tw/stock/three.aspx?m=three"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
-    institutions_map = {}
-    
-    for m_d, ad_date_str in twse_dates:
-        # 加上時間戳參數 _ 徹底打碎證交所快取
-        timestamp = int(time.time() * 1000)
-        url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?date={ad_date_str}&response=json&_={timestamp}"
-        try:
-            res = requests.get(url, headers=headers, timeout=8).json()
-            if res.get("stat") == "OK" and "data" in res:
-                # 倒數第一筆通常是「合計」
-                total_row = res["data"][-1]
-                diff_str = total_row[-1].replace(",", "").strip()
-                diff_billion = round(float(diff_str) / 100000000, 2)
-                institutions_map[m_d] = f"{diff_billion:+.2f}億"
-            else:
-                institutions_map[m_d] = "結算中"
-        except Exception:
-            institutions_map[m_d] = "未取得"
-        
-        # 間隔 0.6 秒避免被證交所防爬機制攔截並返回重複快取
-        time.sleep(0.6)
+    inst_map = {}
+    try:
+        res = requests.get(url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            # 尋找包含「三大法人」字樣的第一個表格
+            target_table = None
+            tables = soup.find_all("table")
+            for tbl in tables:
+                if "三大法人" in tbl.get_text():
+                    target_table = tbl
+                    break
+            if not target_table and tables:
+                target_table = tables[0]
 
-    return institutions_map
+            if target_table:
+                for row in target_table.find_all("tr")[1:]:
+                    tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                    if len(tds) >= 7:
+                        # 日期欄位格式：10/21
+                        date_parts = tds[0].replace("-", "/").split("/")
+                        if len(date_parts) >= 2:
+                            m_d = f"{int(date_parts[-2]):02d}/{int(date_parts[-1]):02d}"
+                            # 取最後一欄「總計」
+                            net_str = tds[-1].replace(",", "").strip()
+                            try:
+                                net_float = float(net_str)
+                                inst_map[m_d] = f"{net_float:+.2f}億"
+                            except ValueError:
+                                inst_map[m_d] = f"{net_str}億"
+                        if len(inst_map) >= 5:
+                            break
+    except Exception as e:
+        print(f"HiStock 三大法人抓取異常: {e}")
+    return inst_map
 
 def is_etf_or_etn(code, name):
-    """排除 ETF 與 ETN（代號 00、01、02 開頭或名稱含特定關鍵字）"""
+    """判斷是否為 ETF 或 ETN（代號 00、01、02 開頭或名稱含特定關鍵字）"""
     code = code.strip()
     name = name.strip()
     if code.startswith(('00', '01', '02')):
@@ -169,8 +175,8 @@ def get_otc_market_rankings():
 
 def build_message():
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    twse_map, twse_dates = get_twse_turnover_5days()
-    inst_map = get_three_institutions_5days(twse_dates)
+    twse_map, twse_days_list = get_twse_turnover_5days()
+    inst_map = get_three_institutions_histock_5days()
     tse_buy, tse_sell = get_tse_market_rankings()
     otc_buy, otc_sell = get_otc_market_rankings()
 
@@ -180,8 +186,9 @@ def build_message():
     # --- 近5日大盤量與三大法人買賣超 ---
     msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
     msg += "─" * 24 + "\n"
-    for d, turnover in twse_map.items():
-        inst_net = inst_map.get(d, "未取得")
+    for d in twse_days_list:
+        turnover = twse_map.get(d, 0.0)
+        inst_net = inst_map.get(d, "已結算")
         msg += f"{d}  大盤:{turnover:>7.1f}億 | 法人:{inst_net}\n"
     msg += "─" * 24 + "\n\n"
 
