@@ -29,43 +29,47 @@ def get_twse_turnover_5days():
     url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
     headers = {"User-Agent": "Mozilla/5.0"}
     turnover_map = {}
+    twse_raw_dates = []
     try:
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res:
             recent_rows = res["data"][-5:]
             recent_rows.reverse()
             for row in recent_rows:
+                # row[0] 格式為 '115/10/21'
                 d_parts = row[0].split('/')
-                month_day = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
+                roc_y = int(d_parts[0])
+                month = int(d_parts[1])
+                day = int(d_parts[2])
+                ad_y = roc_y + 1911
+                ad_date_str = f"{ad_y}{month:02d}{day:02d}"
+                m_d = f"{month:02d}/{day:02d}"
                 turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
-                turnover_map[month_day] = turnover_billion
+                turnover_map[m_d] = turnover_billion
+                twse_raw_dates.append((m_d, ad_date_str))
     except Exception as e:
         print(f"抓取大盤成交量異常: {e}")
-    return turnover_map
+    return turnover_map, twse_raw_dates
 
-def get_three_institutions_5days(twse_dates):
-    """證交所官方 BFI82U 報表：近 5 交易日三大法人合計買賣超金額（億元）"""
+def get_three_institutions_5days(twse_raw_dates):
+    """依據近 5 日交易日期，逐日精準查詢三大法人買賣超合計（億元）"""
     headers = {"User-Agent": "Mozilla/5.0"}
     institutions_map = {}
     
-    current_date = datetime.date.today()
-    checked = 0
-    while len(institutions_map) < len(twse_dates) and checked < 12:
-        d_str = current_date.strftime("%Y%m%d")
-        m_d = current_date.strftime("%m/%d")
-        if m_d in twse_dates:
-            url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?date={d_str}&response=json"
-            try:
-                res = requests.get(url, headers=headers, timeout=8).json()
-                if res.get("stat") == "OK" and "data" in res:
-                    total_row = res["data"][-1]
-                    diff_str = total_row[-1].replace(",", "")
-                    diff_billion = round(float(diff_str) / 100000000, 2)
-                    institutions_map[m_d] = f"{diff_billion:+.2f}億"
-            except Exception:
-                pass
-        current_date -= datetime.timedelta(days=1)
-        checked += 1
+    for m_d, ad_date_str in twse_raw_dates:
+        url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?date={ad_date_str}&response=json"
+        try:
+            res = requests.get(url, headers=headers, timeout=8).json()
+            if res.get("stat") == "OK" and "data" in res:
+                # BFI82U 表格最後一列為「合計」
+                total_row = res["data"][-1]
+                diff_str = total_row[-1].replace(",", "").strip()
+                diff_billion = round(float(diff_str) / 100000000, 2)
+                institutions_map[m_d] = f"{diff_billion:+.2f}億"
+            else:
+                institutions_map[m_d] = "結算中"
+        except Exception:
+            institutions_map[m_d] = "未取得"
 
     return institutions_map
 
@@ -75,7 +79,7 @@ def is_etf_or_etn(code, name):
     name = name.strip()
     if code.startswith(('00', '01', '02')):
         return True
-    if any(keyword in name for keyword in ["ETF", "反1", "正2"]):
+    if any(keyword in name for keyword in ["ETF", "反1", "正2", "債"]):
         return True
     return False
 
@@ -93,7 +97,6 @@ def get_tse_market_rankings():
                 code = row[0].strip()
                 name = row[1].strip()
                 
-                # 排除 ETF 與 ETN
                 if is_etf_or_etn(code, name):
                     continue
 
@@ -120,7 +123,7 @@ def get_otc_market_rankings():
     d_query = f"{roc_year}/{today.month}/{today.day}"
     alt_url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=htm&d={d_query}&se=EW&t=D"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://www.tpex.org.tw/"
     }
     buy_top10, sell_top10 = [], []
@@ -136,7 +139,6 @@ def get_otc_market_rankings():
                     code = tds[0].strip()
                     name = tds[1].strip()
 
-                    # 排除 ETF 與 ETN
                     if is_etf_or_etn(code, name):
                         continue
 
@@ -157,8 +159,8 @@ def get_otc_market_rankings():
 
 def build_message():
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    twse_map = get_twse_turnover_5days()
-    inst_map = get_three_institutions_5days(list(twse_map.keys()))
+    twse_map, twse_raw_dates = get_twse_turnover_5days()
+    inst_map = get_three_institutions_5days(twse_raw_dates)
     tse_buy, tse_sell = get_tse_market_rankings()
     otc_buy, otc_sell = get_otc_market_rankings()
 
@@ -169,7 +171,7 @@ def build_message():
     msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
     msg += "─" * 24 + "\n"
     for d, turnover in twse_map.items():
-        inst_net = inst_map.get(d, "已結算")
+        inst_net = inst_map.get(d, "未取得")
         msg += f"{d}  大盤:{turnover:>7.1f}億 | 法人:{inst_net}\n"
     msg += "─" * 24 + "\n\n"
 
