@@ -44,79 +44,42 @@ def get_twse_turnover_5days():
     return turnover_map
 
 def get_eight_banks_5days():
-    """精確抓取近 5 日八大官股實際買賣超金額（億元）"""
-    url = "https://histock.tw/stock/three.aspx?m=eight"
+    """鎖定玩股網八大公股銀行買賣動向表格，取『合計(萬)』並除以 10000 換算成億元"""
+    url = "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.wantgoo.com/"
     }
     gov_map = {}
     try:
         res = requests.get(url, headers=headers, timeout=12)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            # 尋找包含官股買賣超數據的表格（HiStock 內 class 包含 gvTB 的資料表）
-            tables = soup.find_all("table", class_="gvTB")
-            target_table = None
-            for tbl in tables:
-                header_text = tbl.get_text()
-                # 排除三大法人表格，精確定位八大官股表格
-                if "八大" in header_text or "公股" in header_text or "買進" in header_text:
-                    target_table = tbl
-                    break
-            
-            if not target_table and tables:
-                target_table = tables[-1]
-
-            if target_table:
-                for r in target_table.find_all("tr")[1:]:
+            table = soup.find("table")
+            if table:
+                rows = table.find_all("tr")
+                for r in rows[1:]:
                     tds = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
-                    if len(tds) >= 4:
-                        d_raw = tds[0].replace("-", "/").strip()
-                        parts = d_raw.split("/")
+                    if len(tds) >= 9:
+                        # 日期欄位格式：2026/10/21
+                        date_str = tds[0].replace("-", "/")
+                        parts = date_str.split("/")
                         if len(parts) >= 2:
                             m_d = f"{int(parts[-2]):02d}/{int(parts[-1]):02d}"
-                            # 取買賣超金額欄位（通常為第 4 欄或最後一欄）
-                            val_str = tds[-1].replace(",", "").replace("億", "").strip()
+                            # 取最後一欄「合計(萬)」
+                            total_wan_str = tds[-1].replace(",", "").strip()
                             try:
-                                val_f = float(val_str)
-                                gov_map[m_d] = f"{val_f:+.2f}億"
+                                total_wan = float(total_wan_str)
+                                # 萬除以 10000 換算成億
+                                total_yi = total_wan / 10000.0
+                                gov_map[m_d] = f"{total_yi:+.2f}億"
                             except ValueError:
-                                gov_map[m_d] = f"{val_str}億"
+                                gov_map[m_d] = f"{total_wan_str}萬"
                         if len(gov_map) >= 5:
                             break
     except Exception as e:
-        print(f"HiStock 抓取異常: {e}")
-
-    # 備援機制：若 HiStock 未取得，自動向玩股網請求備援
-    if not gov_map:
-        try:
-            wg_url = "https://www.wantgoo.com/stock/public-bank/trend"
-            wg_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Referer": "https://www.wantgoo.com/"
-            }
-            res_wg = requests.get(wg_url, headers=wg_headers, timeout=12)
-            if res_wg.status_code == 200:
-                soup = BeautifulSoup(res_wg.text, "html.parser")
-                table = soup.find("table")
-                if table:
-                    for r in table.find_all("tr")[1:6]:
-                        tds = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
-                        if len(tds) >= 3:
-                            d_parts = tds[0].replace("-", "/").split("/")
-                            if len(d_parts) >= 2:
-                                m_d = f"{int(d_parts[-2]):02d}/{int(d_parts[-1]):02d}"
-                                val_str = tds[-1].replace(",", "").replace("億", "").strip()
-                                try:
-                                    val_f = float(val_str)
-                                    gov_map[m_d] = f"{val_f:+.2f}億"
-                                except ValueError:
-                                    gov_map[m_d] = f"{val_str}億"
-        except Exception as e:
-            print(f"玩股網備援抓取異常: {e}")
-
+        print(f"玩股網官股金額抓取異常: {e}")
     return gov_map
 
 def get_tse_market_rankings():
