@@ -1,6 +1,7 @@
 import os
 import requests
 import datetime
+import time
 from bs4 import BeautifulSoup
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
@@ -27,9 +28,9 @@ def get_twse_turnover_5days():
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
     url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     turnover_map = {}
-    twse_raw_dates = []
+    twse_dates = []
     try:
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res:
@@ -46,22 +47,28 @@ def get_twse_turnover_5days():
                 m_d = f"{month:02d}/{day:02d}"
                 turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
                 turnover_map[m_d] = turnover_billion
-                twse_raw_dates.append((m_d, ad_date_str))
+                twse_dates.append((m_d, ad_date_str))
     except Exception as e:
         print(f"抓取大盤成交量異常: {e}")
-    return turnover_map, twse_raw_dates
+    return turnover_map, twse_dates
 
-def get_three_institutions_5days(twse_raw_dates):
-    """依據近 5 日交易日期，逐日精準查詢三大法人買賣超合計（億元）"""
-    headers = {"User-Agent": "Mozilla/5.0"}
+def get_three_institutions_5days(twse_dates):
+    """逐日查詢三大法人合計買賣超，並加入間隔與防快取標頭"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
+    }
     institutions_map = {}
     
-    for m_d, ad_date_str in twse_raw_dates:
-        url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?date={ad_date_str}&response=json"
+    for m_d, ad_date_str in twse_dates:
+        # 加上時間戳參數 _ 徹底打碎證交所快取
+        timestamp = int(time.time() * 1000)
+        url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?date={ad_date_str}&response=json&_={timestamp}"
         try:
             res = requests.get(url, headers=headers, timeout=8).json()
             if res.get("stat") == "OK" and "data" in res:
-                # BFI82U 表格最後一列為「合計」
+                # 倒數第一筆通常是「合計」
                 total_row = res["data"][-1]
                 diff_str = total_row[-1].replace(",", "").strip()
                 diff_billion = round(float(diff_str) / 100000000, 2)
@@ -70,11 +77,14 @@ def get_three_institutions_5days(twse_raw_dates):
                 institutions_map[m_d] = "結算中"
         except Exception:
             institutions_map[m_d] = "未取得"
+        
+        # 間隔 0.6 秒避免被證交所防爬機制攔截並返回重複快取
+        time.sleep(0.6)
 
     return institutions_map
 
 def is_etf_or_etn(code, name):
-    """判斷是否為 ETF 或 ETN（代號 00、01、02 開頭或名稱含特定關鍵字）"""
+    """排除 ETF 與 ETN（代號 00、01、02 開頭或名稱含特定關鍵字）"""
     code = code.strip()
     name = name.strip()
     if code.startswith(('00', '01', '02')):
@@ -159,8 +169,8 @@ def get_otc_market_rankings():
 
 def build_message():
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    twse_map, twse_raw_dates = get_twse_turnover_5days()
-    inst_map = get_three_institutions_5days(twse_raw_dates)
+    twse_map, twse_dates = get_twse_turnover_5days()
+    inst_map = get_three_institutions_5days(twse_dates)
     tse_buy, tse_sell = get_tse_market_rankings()
     otc_buy, otc_sell = get_otc_market_rankings()
 
