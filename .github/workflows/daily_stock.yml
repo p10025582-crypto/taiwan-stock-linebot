@@ -23,11 +23,10 @@ def send_line_message(text):
     print(f"LINE 推播狀態: {resp.status_code}")
 
 def get_recent_5_days_twse():
-    """向證交所抓取最近 5 個有開盤交易日的大盤成交量"""
+    """抓取證交所近 5 日大盤成交量"""
     records = {}
     current_date = datetime.date.today()
     checked = 0
-    
     while len(records) < 5 and checked < 15:
         d_str = current_date.strftime("%Y%m%d")
         url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={d_str}&type=MS&response=json"
@@ -42,65 +41,112 @@ def get_recent_5_days_twse():
         checked += 1
     return records
 
-def get_eight_banks_5_days():
-    """抓取公開資訊站近 5 日八大官股買賣超金額"""
-    url = "https://histock.tw/stock/three.aspx?m=eight"
+def get_histock_page(url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    gov_records = []
     try:
         res = requests.get(url, headers=headers, timeout=12)
         if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            table = soup.find("table", class_="gvTB")
-            if table:
-                rows = table.find_all("tr")
-                for r in rows[1:]: # 跳過表頭
-                    cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
-                    if len(cols) >= 3:
-                        # 格式通常為：日期、買進、賣出、買賣超
-                        date_text = cols[0]
-                        net_val = cols[-1] # 最後一欄通常為買賣超金額
-                        gov_records.append({"date": date_text, "net": net_val})
-                        if len(gov_records) >= 5:
-                            break
+            return BeautifulSoup(res.text, "html.parser")
     except Exception as e:
-        print(f"八大官股解析異常: {e}")
-    return gov_records
+        print(f"抓取失敗 {url}: {e}")
+    return None
+
+def parse_rankings(soup, is_otc=False):
+    """解析買超與賣超前 10 大個股及張數"""
+    buy_list = []
+    sell_list = []
+    if not soup:
+        return buy_list, sell_list
+
+    tables = soup.find_all("table", class_="gvTB")
+    # 尋找包含排行數據的表格
+    for table in tables:
+        rows = table.find_all("tr")
+        for r in rows:
+            cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
+            # 辨識個股列（通常包含股號、名稱、張數等）
+            if len(cols) >= 5 and cols[0].isdigit() and len(cols[0]) >= 4:
+                stock_name = cols[1]
+                net_vol = cols[4].replace(",", "") # 買賣超張數欄位
+                try:
+                    vol_int = int(net_vol)
+                    if vol_int > 0 and len(buy_list) < 10:
+                        buy_list.append(f"{stock_name} ({vol_int:+,}張)")
+                    elif vol_int < 0 and len(sell_list) < 10:
+                        sell_list.append(f"{stock_name} ({vol_int:+,}張)")
+                except ValueError:
+                    continue
+    return buy_list, sell_list
+
+def get_eight_banks_summary(soup):
+    """解析近 5 日官股買賣超總額"""
+    records = []
+    if not soup:
+        return records
+    table = soup.find("table", class_="gvTB")
+    if table:
+        for r in table.find_all("tr")[1:]:
+            cols = [td.get_text(strip=True) for td in r.find_all(["td", "th"])]
+            if len(cols) >= 3:
+                records.append({"date": cols[0], "net": cols[-1]})
+                if len(records) >= 5:
+                    break
+    return records
 
 def build_message():
+    today_str = datetime.date.today().strftime("%Y/%m/%d")
+    
+    # 1. 抓取上市八大官股網頁
+    soup_tse = get_histock_page("https://histock.tw/stock/three.aspx?m=eight")
+    # 2. 抓取上櫃八大官股網頁
+    soup_otc = get_histock_page("https://histock.tw/stock/three.aspx?m=eight&s=otc")
+    
     twse_dict = get_recent_5_days_twse()
-    gov_list = get_eight_banks_5_days()
-    today_display = datetime.date.today().strftime("%Y/%m/%d")
+    gov_5days = get_eight_banks_summary(soup_tse)
+    
+    tse_buy, tse_sell = parse_rankings(soup_tse, is_otc=False)
+    otc_buy, otc_sell = parse_rankings(soup_otc, is_otc=True)
 
-    msg = f"🏛️ 【近5日八大官股與大盤籌碼】\n"
-    msg += f"結算基準日：{today_display}\n"
-    msg += "─" * 22 + "\n"
-    msg += " 日期      官股買賣超    大盤成交量\n"
+    msg = f"🏛️ 【八大官股動向彙整】\n"
+    msg += f"📅 日期：{today_str}\n\n"
 
-    # 若順利抓到官股歷史表
-    if gov_list:
-        for item in gov_list:
+    # --- 近5日籌碼對照 ---
+    msg += "📊 【近5日大盤與官股總額】\n"
+    msg += "─" * 20 + "\n"
+    if gov_5days:
+        for item in gov_5days:
             d = item["date"]
             net = item["net"]
-            # 比對大盤成交量
             t_val = "──"
             for k in twse_dict:
                 if k in d:
                     t_val = f"{twse_dict[k]}億"
                     break
-            msg += f"{d:<8} {net:>10}  {t_val:>9}\n"
+            msg += f"{d:<7} 官股:{net:>8} | 大盤:{t_val}\n"
     else:
-        # 備用顯示模式：以證交所 5 日數據呈現
         for d, val in twse_dict.items():
-            msg += f"{d:<8} (請對照連結)   {val}億\n"
+            msg += f"{d:<7} 大盤量: {val}億\n"
+    msg += "─" * 20 + "\n\n"
 
-    msg += "─" * 22 + "\n"
-    msg += "🔗 公開即時明細與買賣超排行：\n"
-    msg += "https://histock.tw/stock/three.aspx?m=eight"
+    # --- 上市排行 ---
+    msg += "📈 【上市官股買超 Top 10】\n"
+    msg += ("\n".join(tse_buy) if tse_buy else "資料結算中或未取得") + "\n\n"
+    
+    msg += "📉 【上市官股賣超 Top 10】\n"
+    msg += ("\n".join(tse_sell) if tse_sell else "資料結算中或未取得") + "\n\n"
+
+    # --- 上櫃排行 ---
+    msg += "📈 【上櫃官股買超 Top 10】\n"
+    msg += ("\n".join(otc_buy) if otc_buy else "資料結算中或未取得") + "\n\n"
+
+    msg += "📉 【上櫃官股賣超 Top 10】\n"
+    msg += ("\n".join(otc_sell) if otc_sell else "資料結算中或未取得") + "\n\n"
+
+    msg += "🔗 明細查驗：https://histock.tw/stock/three.aspx?m=eight"
     return msg
 
 if __name__ == "__main__":
-    msg = build_message()
-    send_line_message(msg)
+    content = build_message()
+    send_line_message(content)
