@@ -2,7 +2,6 @@ import os
 import requests
 import datetime
 
-# 從 GitHub Secrets 讀取金鑰
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
@@ -20,35 +19,64 @@ def send_line_message(text):
         "messages": [{"type": "text", "text": text}]
     }
     resp = requests.post(url, headers=headers, json=payload)
-    print(f"LINE 推播狀態: {resp.status_code}, 回應: {resp.text}")
+    print(f"LINE 推播狀態: {resp.status_code}")
 
-def get_twse_summary():
-    today = datetime.datetime.now()
-    today_str = today.strftime("%Y%m%d")
-    today_display = today.strftime("%Y/%m/%d")
+def get_recent_5_days_data():
+    records = []
+    current_date = datetime.date.today()
+    checked_days = 0
     
-    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={today_str}&type=MS&response=json"
+    # 往前找最多 15 天，湊齊最近 5 個有開盤交易的資料
+    while len(records) < 5 and checked_days < 15:
+        date_str = current_date.strftime("%Y%m%d")
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=MS&response=json"
+        
+        try:
+            res = requests.get(url, timeout=10).json()
+            if res.get("stat") == "OK" and res.get("tables"):
+                table = res["tables"][0]
+                # 取得大盤成交金額 (元)
+                total_val = table["data"][0][1].replace(",", "")
+                total_billion = round(float(total_val) / 100000000, 1)
+                
+                date_display = current_date.strftime("%m/%d")
+                weekday_tw = ["一", "二", "三", "四", "五", "六", "日"][current_date.weekday()]
+                
+                records.append({
+                    "date": f"{date_display}({weekday_tw})",
+                    "turnover": total_billion
+                })
+        except Exception:
+            pass
+        
+        current_date -= datetime.timedelta(days=1)
+        checked_days += 1
+        
+    return records
+
+def build_message():
+    data = get_recent_5_days_data()
+    if not data:
+        return "【台股盤後籌碼】\n今日非交易日，或證交所盤後資料尚未產出。"
     
-    try:
-        res = requests.get(url, timeout=15).json()
-        if res.get("stat") != "OK":
-            return f"【台股盤後快訊】\n日期：{today_display}\n今日非交易日，或證交所尚未產出盤後資料。"
-        
-        # 取得大盤總成交金額
-        turnover_table = res.get("tables", [])[0]
-        total_trade_val = turnover_table["data"][0][1].replace(",", "")
-        total_trade_billion = round(float(total_trade_val) / 100000000, 2)
-        
-        msg = f"📊 【台股籌碼與盤後通知】\n"
-        msg += f"日期：{today_display}\n"
-        msg += f"大盤總成交量：{total_trade_billion} 億元\n\n"
-        msg += f"💡 官股買賣超速算參考：\n"
-        msg += f"公式：大盤總成交量 × 官股買賣超比重(%)\n"
-        msg += f"若當日比重為 +0.50%，則約買超：{round(total_trade_billion * 0.005, 2)} 億元。"
-        return msg
-    except Exception as e:
-        return f"資料抓取失敗：{e}"
+    msg = "📊 【近5日大盤成交量與官股速算】\n"
+    msg += "─" * 16 + "\n"
+    msg += "日期       大盤成交量   比重1%金額\n"
+    
+    for r in data:
+        # 每 1% 對應的買超金額（億元）
+        val_1pct = round(r["turnover"] * 0.01, 2)
+        msg += f"{r['date']}   {r['turnover']:>7.1f}億   約 {val_1pct:>5.2f}億\n"
+    
+    msg += "─" * 16 + "\n"
+    msg += "💡 換算範例：\n"
+    msg += "若今日官股買賣超比重為 +0.52%\n"
+    latest_val = data[0]["turnover"]
+    calc_val = round(latest_val * 0.0052, 2)
+    msg += f"👉 換算買超 ＝ {latest_val}億 × 0.52% ≒ {calc_val} 億元"
+    
+    return msg
 
 if __name__ == "__main__":
-    content = get_twse_summary()
-    send_line_message(content)
+    message = build_message()
+    send_line_message(message)
