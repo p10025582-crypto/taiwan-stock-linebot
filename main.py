@@ -23,23 +23,48 @@ def send_line_message(text):
     print(f"LINE 推播狀態: {resp.status_code}")
 
 def get_twse_turnover_5days():
-    """證交所官方 FMTQIK 報表：近 5 交易日大盤成交量（億元）"""
+    """
+    抓取一般撮合之大盤成交金額（排除鉅額等特定交易，對齊看盤軟體的 8792.3 億）
+    """
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
-    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
     headers = {"User-Agent": "Mozilla/5.0"}
     turnover_map = {}
     twse_days_list = []
+
+    # 1. 優先嘗試從證交所 MI_INDEX 抓取當日純成交金額（不含鉅額）
+    url_mi = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&response=json"
+    today_pure_billion = None
+    try:
+        res_mi = requests.get(url_mi, headers=headers, timeout=10).json()
+        if res_mi.get("stat") == "OK":
+            tables = res_mi.get("tables", [])
+            for tbl in tables:
+                if "市場成交資訊" in tbl.get("title", ""):
+                    for row in tbl.get("data", []):
+                        if "1.成交金額" in row[0]:
+                            val_str = row[1].replace(",", "").strip()
+                            today_pure_billion = round(float(val_str) / 100000000, 1)
+                            break
+    except Exception:
+        pass
+
+    # 2. 抓取歷史近 5 日報表
+    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
     try:
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res:
             recent_rows = res["data"][-5:]
             recent_rows.reverse()
-            for row in recent_rows:
-                # row[0] 格式如 '115/10/21'
+            for idx, row in enumerate(recent_rows):
                 d_parts = row[0].split('/')
                 m_d = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
-                turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
+                # 最新一天若有取得純普通股金額則優先使用，確保完全符合 8792.3 億
+                if idx == 0 and today_pure_billion:
+                    turnover_billion = today_pure_billion
+                else:
+                    turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
+                
                 turnover_map[m_d] = turnover_billion
                 twse_days_list.append(m_d)
     except Exception as e:
@@ -47,7 +72,7 @@ def get_twse_turnover_5days():
     return turnover_map, twse_days_list
 
 def get_three_institutions_histock_5days():
-    """從 HiStock 的『近三十日上市三大法人買賣超』表格抓取總計（億元）"""
+    """從 HiStock 歷史表抓取近 5 日三大法人買賣超合計（億元）"""
     url = "https://histock.tw/stock/three.aspx?m=three"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -58,7 +83,6 @@ def get_three_institutions_histock_5days():
         res = requests.get(url, headers=headers, timeout=12)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            # 尋找包含「三大法人」字樣的第一個表格
             target_table = None
             tables = soup.find_all("table")
             for tbl in tables:
@@ -72,11 +96,9 @@ def get_three_institutions_histock_5days():
                 for row in target_table.find_all("tr")[1:]:
                     tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
                     if len(tds) >= 7:
-                        # 日期欄位格式：10/21
                         date_parts = tds[0].replace("-", "/").split("/")
                         if len(date_parts) >= 2:
                             m_d = f"{int(date_parts[-2]):02d}/{int(date_parts[-1]):02d}"
-                            # 取最後一欄「總計」
                             net_str = tds[-1].replace(",", "").strip()
                             try:
                                 net_float = float(net_str)
@@ -184,7 +206,7 @@ def build_message():
     msg += f"📅 日期：{today_str}\n\n"
 
     # --- 近5日大盤量與三大法人買賣超 ---
-    msg += "🏛️【近5日大盤量與三大法人動向】\n"
+    msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
     msg += "─" * 24 + "\n"
     for d in twse_days_list:
         turnover = twse_map.get(d, 0.0)
@@ -193,21 +215,21 @@ def build_message():
     msg += "─" * 24 + "\n\n"
 
     # --- 上市全市場三大法人排行（排除 ETF） ---
-    msg += "📈【上市三大法人買超Top10】\n"
+    msg += "📈 【上市三大法人買超 Top 10 (個股)】\n"
     msg += ("\n".join(tse_buy) if tse_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉【上市三大法人賣超Top10】\n"
+    msg += "📉 【上市三大法人賣超 Top 10 (個股)】\n"
     msg += ("\n".join(tse_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 上櫃全市場三大法人排行（排除 ETF） ---
-    msg += "📈【上櫃三大法人買超Top10】\n"
-    msg += ("\n".join(otc_buy) if otc_buy else "資料未取得或結算中") + "\n\n"
+    msg += "📈 【上櫃三大法人買超 Top 10 (個股)】\n"
+    msg += ("\n".join(otc_buy) if env_otc := otc_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉【上櫃三大法人賣超Top10】\n"
-    msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
+    msg += "📉 【上櫃三大法人賣超 Top 10 (個股)】\n"
+    msg += ("\n".join(otc_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 官股查詢直達連結 ---
-    msg += "🏛️【八大官股即時動向查詢】\n"
+    msg += "🏛️ 【八大官股即時動向查詢】\n"
     msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
 
     return msg
