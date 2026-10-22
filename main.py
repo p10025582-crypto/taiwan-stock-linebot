@@ -184,7 +184,7 @@ def build_message():
     msg += f"📅 日期：{today_str}\n\n"
 
     # --- 近5日大盤量與三大法人買賣超 ---
-    msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
+    msg += "🏛️【近5日大盤量與三大法人動向】\n"
     msg += "─" * 24 + "\n"
     for d in twse_days_list:
         turnover = twse_map.get(d, 0.0)
@@ -193,21 +193,21 @@ def build_message():
     msg += "─" * 24 + "\n\n"
 
     # --- 上市全市場三大法人排行（排除 ETF） ---
-    msg += "📈 【上市三大法人買超 Top 10 (個股)】\n"
+    msg += "📈【上市三大法人買超Top10】\n"
     msg += ("\n".join(tse_buy) if tse_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉 【上市三大法人賣超 Top 10 (個股)】\n"
+    msg += "📉【上市三大法人賣超Top10】\n"
     msg += ("\n".join(tse_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 上櫃全市場三大法人排行（排除 ETF） ---
-    msg += "📈 【上櫃三大法人買超 Top 10 (個股)】\n"
+    msg += "📈【上櫃三大法人買超Top10】\n"
     msg += ("\n".join(otc_buy) if otc_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉 【上櫃三大法人賣超 Top 10 (個股)】\n"
+    msg += "📉【上櫃三大法人賣超Top10】\n"
     msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 官股查詢直達連結 ---
-    msg += "🏛️ 【八大官股即時動向查詢】\n"
+    msg += "🏛️【八大官股即時動向查詢】\n"
     msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
 
     return msg
