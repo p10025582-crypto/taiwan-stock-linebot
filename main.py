@@ -23,9 +23,7 @@ def send_line_message(text):
     print(f"LINE 推播狀態: {resp.status_code}")
 
 def get_twse_turnover_5days():
-    """
-    抓取一般撮合之大盤成交金額（排除鉅額等特定交易，對齊看盤軟體的 8792.3 億）
-    """
+    """抓取一般撮合之大盤成交金額（排除鉅額等特定交易）"""
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -59,7 +57,6 @@ def get_twse_turnover_5days():
             for idx, row in enumerate(recent_rows):
                 d_parts = row[0].split('/')
                 m_d = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
-                # 最新一天若有取得純普通股金額則優先使用，確保完全符合 8792.3 億
                 if idx == 0 and today_pure_billion:
                     turnover_billion = today_pure_billion
                 else:
@@ -147,9 +144,9 @@ def get_tse_market_rankings():
             
             stock_data.sort(key=lambda x: x[1], reverse=True)
             for idx, (name, sheets) in enumerate(stock_data[:10], 1):
-                buy_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+                buy_top10.append(f"{idx}. {name} ({sheets:+,}張)")
             for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
-                sell_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+                sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
     except Exception as e:
         print(f"上市排行異常: {e}")
     return buy_top10, sell_top10
@@ -188,9 +185,9 @@ def get_otc_market_rankings():
             if stock_data:
                 stock_data.sort(key=lambda x: x[1], reverse=True)
                 for idx, (name, sheets) in enumerate(stock_data[:10], 1):
-                    buy_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+                    buy_top10.append(f"{idx}. {name} ({sheets:+,}張)")
                 for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
-                    sell_top10.append(f"{idx:>2}. {name} ({sheets:+,}張)")
+                    sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
     except Exception as e:
         print(f"上櫃抓取異常: {e}")
     return buy_top10, sell_top10
@@ -202,34 +199,34 @@ def build_message():
     tse_buy, tse_sell = get_tse_market_rankings()
     otc_buy, otc_sell = get_otc_market_rankings()
 
-    msg = f"📊 【台股盤後籌碼總覽】\n"
+    msg = f"📊【台股盤後籌碼總覽】\n"
     msg += f"📅 日期：{today_str}\n\n"
 
     # --- 近5日大盤量與三大法人買賣超 ---
     msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
-    msg += "─" * 24 + "\n"
+    msg += "─" * 22 + "\n"
     for d in twse_days_list:
         turnover = twse_map.get(d, 0.0)
         inst_net = inst_map.get(d, "已結算")
-        msg += f"{d}  大盤:{turnover:>7.1f}億 | 法人:{inst_net}\n"
-    msg += "─" * 24 + "\n\n"
+        msg += f"{d} 大盤:{turnover}億 | 法人:{inst_net}\n"
+    msg += "─" * 22 + "\n\n"
 
-    # --- 上市全市場三大法人排行（排除 ETF） ---
-    msg += "📈 【上市三大法人買超 Top 10 (個股)】\n"
+    # --- 上市三大法人排行 ---
+    msg += "📈【上市三大法人買超Top10】\n"
     msg += ("\n".join(tse_buy) if tse_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉 【上市三大法人賣超 Top 10 (個股)】\n"
+    msg += "📉【上市三大法人賣超Top10】\n"
     msg += ("\n".join(tse_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
 
-    # --- 上櫃全市場三大法人排行（排除 ETF） ---
-    msg += "📈 【上櫃三大法人買超 Top 10 (個股)】\n"
-    msg += ("\n".join(otc_buy) if env_otc := otc_buy else "資料未取得或結算中") + "\n\n"
+    # --- 上櫃三大法人排行 ---
+    msg += "📈【上櫃三大法人買超Top10】\n"
+    msg += ("\n".join(otc_buy) if otc_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉 【上櫃三大法人賣超 Top 10 (個股)】\n"
-    msg += ("\n".join(otc_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
+    msg += "📉【上櫃三大法人賣超Top10】\n"
+    msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 官股查詢直達連結 ---
-    msg += "🏛️ 【八大官股即時動向查詢】\n"
+    msg += "🏛️【八大官股即時動向查詢】\n"
     msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
 
     return msg
