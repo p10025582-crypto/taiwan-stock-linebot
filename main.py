@@ -1,26 +1,52 @@
 import os
+import sys
 import requests
 import datetime
 from bs4 import BeautifulSoup
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.environ.get("LINE_USER_ID")
+
+def is_trading_day():
+    """
+    向證交所官方 FMTQIK 報表確認今天是否有實際開盤交易：
+    若今日為國定假日、週末或颱風假，證交所最新一筆成交紀錄不會是今天，回傳 False。
+    """
+    today = datetime.date.today()
+    date_str = today.strftime("%Y%m%d")
+    roc_year = today.year - 1911
+    # 格式如：115/10/26
+    today_roc_str = f"{roc_year}/{today.month:02d}/{today.day:02d}"
+
+    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10).json()
+        if res.get("stat") == "OK" and "data" in res and len(res["data"]) > 0:
+            last_record_date = res["data"][-1][0].strip()
+            # 檢查最新成交日的日期是否與今天完全一致
+            if last_record_date == today_roc_str:
+                return True
+    except Exception as e:
+        print(f"判斷開市狀態異常: {e}")
+        # 若網路異常或證交所查無資料，保守視為開盤或交由後續邏輯處理
+        return True
+    return False
 
 def send_line_message(text):
-    if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("未設定 LINE 金鑰或 User ID")
+    if not LINE_ACCESS_TOKEN:
+        print("未設定 LINE 金鑰 (LINE_CHANNEL_ACCESS_TOKEN)")
         return
-    url = "https://api.line.me/v2/bot/message/push"
+    # 使用 broadcast API，推播給所有加入官方帳號的好友
+    url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
     payload = {
-        "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": text}]
     }
     resp = requests.post(url, headers=headers, json=payload)
-    print(f"LINE 推播狀態: {resp.status_code}")
+    print(f"LINE 廣播推播狀態: {resp.status_code}")
 
 def get_twse_market_data_and_bias():
     """
@@ -148,7 +174,6 @@ def get_histock_three_and_futures_5days():
                             foreign_str = tds[1].replace(",", "").strip()
                             try:
                                 foreign_val = int(foreign_str)
-                                # 若為負數以「空單」呈現絕對值；正數則標註「多單」
                                 if foreign_val < 0:
                                     futures_map[m_d] = f"空單:{abs(foreign_val):,}口"
                                 else:
@@ -263,7 +288,7 @@ def build_message():
     msg += "─" * 22 + "\n\n"
 
     # --- 近5日台指期外資未平倉淨空單 ---
-    msg += "🎯【近5日外資未平倉淨空單】\n"
+    msg += "🎯【近5日台指期外資未平倉淨空單】\n"
     msg += "─" * 22 + "\n"
     for d in twse_days_list:
         foreign_label = futures_map.get(d, "已結算")
@@ -279,25 +304,30 @@ def build_message():
     msg += "─" * 22 + "\n\n"
 
     # --- 上市三大法人排行 ---
-    msg += "📈【上市三大法人買超Top10】\n"
+    msg += "📈【上市三大法人買超Top】\n"
     msg += ("\n".join(tse_buy) if tse_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉【上市三大法人賣超Top10】\n"
+    msg += "📉【上市三大法人賣超Top】\n"
     msg += ("\n".join(tse_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 上櫃三大法人排行 ---
-    msg += "📈【上櫃三大法人買超Top10】\n"
+    msg += "📈【上櫃三大法人買超Top】\n"
     msg += ("\n".join(otc_buy) if otc_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉【上櫃三大法人賣超Top10】\n"
+    msg += "📉【上櫃三大法人賣超Top】\n"
     msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 官股查詢直達連結 ---
-    msg += "🏛️【八大官股即時動向查詢】\n"
+    msg += "🏛️ 【八大官股即時動向查詢】\n"
     msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
 
     return msg
 
 if __name__ == "__main__":
+    # 檢查今日是否為開盤交易日；遇颱風假、國定假日無成交數據則自動停止執行
+    if not is_trading_day():
+        print("今日為休市日（國定假日或颱風假），取消推播。")
+        sys.exit(0)
+
     content = build_message()
     send_line_message(content)
