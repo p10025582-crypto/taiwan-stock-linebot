@@ -14,7 +14,6 @@ def is_trading_day():
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
     roc_year = today.year - 1911
-    # 格式如：115/10/26
     today_roc_str = f"{roc_year}/{today.month:02d}/{today.day:02d}"
 
     url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
@@ -23,12 +22,11 @@ def is_trading_day():
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res and len(res["data"]) > 0:
             last_record_date = res["data"][-1][0].strip()
-            # 檢查最新成交日的日期是否與今天完全一致
+            # 比對最新交易日是否為今天
             if last_record_date == today_roc_str:
                 return True
     except Exception as e:
         print(f"判斷開市狀態異常: {e}")
-        # 若網路異常或證交所查無資料，保守視為開盤或交由後續邏輯處理
         return True
     return False
 
@@ -230,34 +228,44 @@ def get_tse_market_rankings():
     return buy_top10, sell_top10
 
 def get_otc_market_rankings():
-    """櫃買中心官方日報：上櫃全市場三大法人合計買超/賣超 Top 10（排除非個股）"""
+    """櫃買中心官方日報：改用官方 JSON API 抓取上櫃全市場三大法人合計買超/賣超 Top 10"""
     today = datetime.date.today()
     roc_year = today.year - 1911
-    d_query = f"{roc_year}/{today.month}/{today.day}"
-    alt_url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=htm&d={d_query}&se=EW&t=D"
+    d_query = f"{roc_year}/{today.month:02d}/{today.day:02d}"
+    url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&d={d_query}&se=EW&t=D"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Referer": "https://www.tpex.org.tw/"
     }
     buy_top10, sell_top10 = [], []
     try:
-        alt_res = requests.get(alt_url, headers=headers, timeout=12)
-        if alt_res.status_code == 200:
-            soup = BeautifulSoup(alt_res.text, "html.parser")
-            rows = soup.find_all("tr")
+        res = requests.get(url, headers=headers, timeout=12).json()
+        rows = res.get("aaData", [])
+        if not rows:
+            # 備用容錯格式
+            d_query_alt = f"{roc_year}/{today.month}/{today.day}"
+            url_alt = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&d={d_query_alt}&se=EW&t=D"
+            res_alt = requests.get(url_alt, headers=headers, timeout=12).json()
+            rows = res_alt.get("aaData", [])
+
+        if rows:
             stock_data = []
             for r in rows:
-                tds = [td.get_text(strip=True) for td in r.find_all("td")]
-                if len(tds) >= 11 and tds[0].isdigit():
-                    code = tds[0].strip()
-                    name = tds[1].strip()
+                if len(r) >= 11:
+                    code = str(r[0]).strip()
+                    name = str(r[1]).strip()
+
                     if not is_pure_stock(code, name):
                         continue
+
                     try:
-                        sheets = round(int(tds[-1].replace(",", "")) / 1000)
+                        shares_str = str(r[-1]).replace(",", "").strip()
+                        shares = int(shares_str)
+                        sheets = round(shares / 1000)
                         stock_data.append((name, sheets))
-                    except ValueError:
+                    except (ValueError, IndexError):
                         continue
+
             if stock_data:
                 stock_data.sort(key=lambda x: x[1], reverse=True)
                 for idx, (name, sheets) in enumerate(stock_data[:10], 1):
@@ -265,7 +273,7 @@ def get_otc_market_rankings():
                 for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
                     sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
     except Exception as e:
-        print(f"上櫃抓取異常: {e}")
+        print(f"上櫃 JSON 抓取異常: {e}")
     return buy_top10, sell_top10
 
 def build_message():
@@ -318,13 +326,12 @@ def build_message():
     msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 官股查詢直達連結 ---
-    msg += "🏛️ 【八大官股即時動向查詢】\n"
+    msg += "🏛️【八大官股即時動向查詢】\n"
     msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
 
     return msg
 
 if __name__ == "__main__":
-    # 檢查今日是否為開盤交易日；遇颱風假、國定假日無成交數據則自動停止執行
     if not is_trading_day():
         print("今日為休市日（國定假日或颱風假），取消推播。")
         sys.exit(0)
