@@ -21,7 +21,8 @@ def is_trading_day():
     try:
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res and len(res["data"]) > 0:
-            last_record_date = res["data"][-1][0].strip()
+            last_record_date = str(res["data"][-1][0]).strip()
+            # 比對最新交易日是否為今天
             if last_record_date == today_roc_str:
                 return True
     except Exception as e:
@@ -33,7 +34,6 @@ def send_line_message(text):
     if not LINE_ACCESS_TOKEN:
         print("未設定 LINE 金鑰 (LINE_CHANNEL_ACCESS_TOKEN)")
         return
-    # 使用 broadcast API，推播給所有加入官方帳號的好友
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
@@ -42,13 +42,13 @@ def send_line_message(text):
     payload = {
         "messages": [{"type": "text", "text": text}]
     }
-    resp = requests.post(url, headers=headers, json=payload)
-    print(f"LINE 廣播推播狀態: {resp.status_code}")
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        print(f"LINE 廣播推播狀態: {resp.status_code}")
+    except Exception as e:
+        print(f"LINE 發送異常: {e}")
 
 def get_twse_market_data_and_bias():
-    """
-    抓取一般撮合之大盤成交金額（排除鉅額等特定交易）以及近 5 日收盤 5MA 乖離率
-    """
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -56,44 +56,42 @@ def get_twse_market_data_and_bias():
     twse_days_list = []
     bias_map = {}
 
-    # 1. 抓取當日純成交金額（不含鉅額）
-    url_mi = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&response=json"
     today_pure_billion = None
     try:
+        url_mi = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&response=json"
         res_mi = requests.get(url_mi, headers=headers, timeout=10).json()
         if res_mi.get("stat") == "OK":
             tables = res_mi.get("tables", [])
             for tbl in tables:
                 if "市場成交資訊" in tbl.get("title", ""):
                     for row in tbl.get("data", []):
-                        if "1.成交金額" in row[0]:
-                            val_str = row[1].replace(",", "").strip()
+                        if "1.成交金額" in str(row[0]):
+                            val_str = str(row[1]).replace(",", "").strip()
                             today_pure_billion = round(float(val_str) / 100000000, 1)
                             break
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"MI_INDEX 成交量抓取異常: {e}")
 
-    # 2. 抓取整月 FMTQIK 報表計算近 5 日成交金額與 5MA 乖離率
-    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
     try:
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res:
             all_rows = res["data"]
             recent_5_rows = all_rows[-5:][::-1]
             for idx, row in enumerate(recent_5_rows):
-                d_parts = row[0].split('/')
+                d_parts = str(row[0]).split('/')
                 m_d = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
                 if idx == 0 and today_pure_billion:
                     turnover_billion = today_pure_billion
                 else:
-                    turnover_billion = round(float(row[2].replace(",", "")) / 100000000, 1)
+                    turnover_billion = round(float(str(row[2]).replace(",", "")) / 100000000, 1)
                 
                 turnover_map[m_d] = turnover_billion
                 twse_days_list.append(m_d)
 
             if len(all_rows) >= 5:
-                closes = [float(r[4].replace(",", "").strip()) for r in all_rows]
-                dates = [r[0] for r in all_rows]
+                closes = [float(str(r[4]).replace(",", "").strip()) for r in all_rows]
+                dates = [str(r[0]) for r in all_rows]
                 
                 calc_len = min(5, len(all_rows) - 4)
                 for i in range(len(all_rows) - calc_len, len(all_rows)):
@@ -111,13 +109,9 @@ def get_twse_market_data_and_bias():
     return turnover_map, twse_days_list, bias_map
 
 def get_histock_three_and_futures_5days():
-    """
-    從 HiStock 同時抓取近 5 日三大法人買賣超金額與台指期外資未平倉空單/多單口數
-    """
     url = "https://histock.tw/stock/three.aspx?m=three"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     inst_map = {}
     futures_map = {}
@@ -127,7 +121,7 @@ def get_histock_three_and_futures_5days():
             soup = BeautifulSoup(res.text, "html.parser")
             tables = soup.find_all("table")
             
-            # 1. 抓取三大法人買賣超表格
+            # 1. 三大法人買賣超
             target_table_inst = None
             for tbl in tables:
                 if "三大法人" in tbl.get_text():
@@ -152,7 +146,7 @@ def get_histock_three_and_futures_5days():
                         if len(inst_map) >= 5:
                             break
 
-            # 2. 抓取期貨未平倉表格（外資留倉口數）
+            # 2. 期貨未平倉
             target_table_fut = None
             for tbl in tables:
                 if "台股期貨未平倉" in tbl.get_text():
@@ -184,9 +178,8 @@ def get_histock_three_and_futures_5days():
     return inst_map, futures_map
 
 def is_pure_stock(code, name):
-    """只保留普通個股，排除 6 碼權證、特別股、ETF、ETN 與牛熊證"""
-    code = code.strip()
-    name = name.strip()
+    code = str(code).strip()
+    name = str(name).strip()
     if len(code) != 4 or not code.isdigit():
         return False
     if code.startswith(('00', '01', '02')):
@@ -197,7 +190,6 @@ def is_pure_stock(code, name):
     return True
 
 def get_tse_market_rankings():
-    """證交所官方 T86 API：上市全市場三大法人合計買超/賣超 Top 10（排除非個股）"""
     today_str = datetime.date.today().strftime("%Y%m%d")
     url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={today_str}&selectType=ALL&response=json"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -207,12 +199,12 @@ def get_tse_market_rankings():
         if res.get("stat") == "OK" and "data" in res:
             stock_data = []
             for row in res["data"]:
-                code = row[0].strip()
-                name = row[1].strip()
+                code = str(row[0]).strip()
+                name = str(row[1]).strip()
                 if not is_pure_stock(code, name):
                     continue
                 try:
-                    shares = int(row[18].replace(",", ""))
+                    shares = int(str(row[18]).replace(",", ""))
                     sheets = round(shares / 1000)
                     stock_data.append((name, sheets))
                 except (ValueError, IndexError):
@@ -227,33 +219,27 @@ def get_tse_market_rankings():
     return buy_top10, sell_top10
 
 def get_otc_market_rankings():
-    """櫃買中心上櫃三大法人合計買超/賣超 Top 10（含備援機制，確保不開天窗）"""
+    """櫃買中心上櫃三大法人合計買賣超（全例外捕獲保護）"""
     today = datetime.date.today()
     roc_year = today.year - 1911
     d_query = f"{roc_year}/{today.month:02d}/{today.day:02d}"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Referer": "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge.php?l=zh-tw",
-        "X-Requested-With": "XMLHttpRequest"
+        "Referer": "https://www.tpex.org.tw/"
     }
 
     buy_top10, sell_top10 = [], []
 
-    # 通道 1：櫃買中心官方日報 API
-    url_tpex = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={d_query}"
+    # 通道 1：櫃買中心官方日報
     try:
+        url_tpex = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={d_query}"
         res = requests.get(url_tpex, headers=headers, timeout=10)
         if res.status_code == 200:
             data_json = res.json()
-            rows = data_json.get("aaData", []) or data_json.get("tables", [{}])[0].get("data", [])
-            
-            if not rows:
-                url_tpex_alt = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={roc_year}/{today.month}/{today.day}"
-                res_alt = requests.get(url_tpex_alt, headers=headers, timeout=10)
-                if res_alt.status_code == 200:
-                    rows = res_alt.json().get("aaData", [])
+            rows = data_json.get("aaData", [])
+            if not rows and "tables" in data_json and len(data_json["tables"]) > 0:
+                rows = data_json["tables"][0].get("data", [])
 
             if rows:
                 stock_data = []
@@ -264,10 +250,11 @@ def get_otc_market_rankings():
                         if not is_pure_stock(code, name):
                             continue
                         try:
-                            shares = int(str(r[-1]).replace(",", "").strip())
+                            val_str = str(r[-1]).replace(",", "").replace("+", "").strip()
+                            shares = int(val_str)
                             sheets = round(shares / 1000)
                             stock_data.append((name, sheets))
-                        except (ValueError, IndexError):
+                        except Exception:
                             continue
                 
                 if stock_data:
@@ -278,26 +265,27 @@ def get_otc_market_rankings():
                         sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
                     return buy_top10, sell_top10
     except Exception as e:
-        print(f"櫃買官方通道連線異常: {e}")
+        print(f"通道 1 異常: {e}")
 
-    # 通道 2（備援）：若櫃買中心伺服器逾時或格式變更，從財經排行備援抓取
+    # 通道 2（HTML 解析備援）
     try:
-        url_backup = "https://histock.tw/stock/three.aspx?m=three&m1=otc"
-        res_b = requests.get(url_backup, headers=headers, timeout=10)
-        if res_b.status_code == 200:
-            soup = BeautifulSoup(res_b.text, "html.parser")
+        alt_url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=htm&d={roc_year}/{today.month}/{today.day}&se=EW&t=D"
+        alt_res = requests.get(alt_url, headers=headers, timeout=10)
+        if alt_res.status_code == 200:
+            soup = BeautifulSoup(alt_res.text, "html.parser")
             stock_data = []
-            for row in soup.find_all("tr"):
-                tds = [td.get_text(strip=True) for td in row.find_all("td")]
-                if len(tds) >= 4 and len(tds[0]) == 4 and tds[0].isdigit():
-                    code = tds[0]
-                    name = tds[1]
+            for r in soup.find_all("tr"):
+                tds = [td.get_text(strip=True) for td in r.find_all("td")]
+                if len(tds) >= 11 and tds[0].isdigit():
+                    code = tds[0].strip()
+                    name = tds[1].strip()
                     if not is_pure_stock(code, name):
                         continue
                     try:
-                        sheets = int(tds[-1].replace(",", "").replace("+", ""))
+                        val_str = tds[-1].replace(",", "").replace("+", "").strip()
+                        sheets = round(int(val_str) / 1000)
                         stock_data.append((name, sheets))
-                    except ValueError:
+                    except Exception:
                         continue
             if stock_data:
                 stock_data.sort(key=lambda x: x[1], reverse=True)
@@ -306,7 +294,7 @@ def get_otc_market_rankings():
                 for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
                     sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
     except Exception as e:
-        print(f"上櫃備援通道異常: {e}")
+        print(f"通道 2 備援異常: {e}")
 
     return buy_top10, sell_top10
 
@@ -317,11 +305,11 @@ def build_message():
     tse_buy, tse_sell = get_tse_market_rankings()
     otc_buy, otc_sell = get_otc_market_rankings()
 
-    msg = f"📊 【台股盤後籌碼總覽】\n"
+    msg = f"📊【台股盤後籌碼總覽】\n"
     msg += f"📅 日期：{today_str}\n\n"
 
     # --- 近5日大盤量與三大法人買賣超 ---
-    msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
+    msg += "🏛️【近5日大盤量與三大法人動向】\n"
     msg += "─" * 22 + "\n"
     for d in twse_days_list:
         turnover = twse_map.get(d, 0.0)
@@ -330,7 +318,7 @@ def build_message():
     msg += "─" * 22 + "\n\n"
 
     # --- 近5日台指期外資未平倉淨空單 ---
-    msg += "🎯 【近5日台指期外資未平倉淨空單】\n"
+    msg += "🎯【近5日台指期外資未平倉淨空單】\n"
     msg += "─" * 22 + "\n"
     for d in twse_days_list:
         foreign_label = futures_map.get(d, "已結算")
@@ -338,7 +326,7 @@ def build_message():
     msg += "─" * 22 + "\n\n"
 
     # --- 近5日大盤5MA乖離率 ---
-    msg += "📐 【近5日大盤5MA乖離率】\n"
+    msg += "📐【近5日大盤5MA乖離率】\n"
     msg += "─" * 22 + "\n"
     for d in twse_days_list:
         bias_val = bias_map.get(d, "計算中")
@@ -346,12 +334,32 @@ def build_message():
     msg += "─" * 22 + "\n\n"
 
     # --- 上市三大法人排行 ---
-    msg += "📈 【上市三大法人買超 Top 10】\n"
+    msg += "📈【上市三大法人買超Top】\n"
     msg += ("\n".join(tse_buy) if tse_buy else "資料未取得或結算中") + "\n\n"
 
-    msg += "📉 【上市三大法人賣超 Top 10】\n"
+    msg += "📉【上市三大法人賣超Top】\n"
     msg += ("\n".join(tse_sell) if tse_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 上櫃三大法人排行 ---
-    msg += "📈 【上櫃三大法人買超 Top 10】\n"
-    msg += ("\n".join(ot
+    msg += "📈【上櫃三大法人買超Top】\n"
+    msg += ("\n".join(otc_buy) if otc_buy else "資料未取得或結算中") + "\n\n"
+
+    msg += "📉【上櫃三大法人賣超Top】\n"
+    msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
+
+    # --- 官股查詢直達連結 ---
+    msg += "🏛️【八大官股即時動向查詢】\n"
+    msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
+
+    return msg
+
+if __name__ == "__main__":
+    try:
+        if not is_trading_day():
+            print("今日為休市日（國定假日或颱風假），取消推播。")
+            sys.exit(0)
+
+        content = build_message()
+        send_line_message(content)
+    except Exception as e:
+        print(f"主執行程序異常: {e}")
