@@ -49,6 +49,10 @@ def send_line_message(text):
         print(f"LINE 發送異常: {e}")
 
 def get_twse_market_data_and_bias():
+    """
+    抓取大盤成交量與近 5 日 5MA 乖離率。
+    具備「跨月份自動拼接」功能：當月資料不足 5 筆時，自動向前抓取上月補齊。
+    """
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -56,6 +60,7 @@ def get_twse_market_data_and_bias():
     twse_days_list = []
     bias_map = {}
 
+    # 1. 當日純撮合成交量（排除鉅額）
     today_pure_billion = None
     try:
         url_mi = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&response=json"
@@ -72,11 +77,34 @@ def get_twse_market_data_and_bias():
     except Exception as e:
         print(f"MI_INDEX 成交量抓取異常: {e}")
 
+    # 2. 抓取當月成交紀錄（FMTQIK）
+    all_rows = []
     try:
-        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
-        res = requests.get(url, headers=headers, timeout=10).json()
-        if res.get("stat") == "OK" and "data" in res:
-            all_rows = res["data"]
+        url_curr = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
+        res_curr = requests.get(url_curr, headers=headers, timeout=10).json()
+        if res_curr.get("stat") == "OK" and "data" in res_curr:
+            all_rows = res_curr["data"]
+    except Exception as e:
+        print(f"當月 FMTQIK 抓取異常: {e}")
+
+    # 3. 跨月自動補足機制：若當月交易日小於 8 天，自動抓取上月補足資料供計算 5MA 與連續 5 日對照
+    if len(all_rows) < 8:
+        # 計算上個月的最後一天日期
+        first_of_this_month = today.replace(day=1)
+        last_day_prev_month = first_of_this_month - datetime.timedelta(days=1)
+        prev_date_str = last_day_prev_month.strftime("%Y%m%d")
+        try:
+            url_prev = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={prev_date_str}&response=json"
+            res_prev = requests.get(url_prev, headers=headers, timeout=10).json()
+            if res_prev.get("stat") == "OK" and "data" in res_prev:
+                # 將上個月的資料放在前面，拼接當月資料
+                all_rows = res_prev["data"] + all_rows
+        except Exception as e:
+            print(f"上月 FMTQIK 補齊異常: {e}")
+
+    # 4. 解析近 5 日大盤量與 5MA 乖離率
+    try:
+        if len(all_rows) >= 5:
             recent_5_rows = all_rows[-5:][::-1]
             for idx, row in enumerate(recent_5_rows):
                 d_parts = str(row[0]).split('/')
@@ -89,22 +117,21 @@ def get_twse_market_data_and_bias():
                 turnover_map[m_d] = turnover_billion
                 twse_days_list.append(m_d)
 
-            if len(all_rows) >= 5:
-                closes = [float(str(r[4]).replace(",", "").strip()) for r in all_rows]
-                dates = [str(r[0]) for r in all_rows]
+            closes = [float(str(r[4]).replace(",", "").strip()) for r in all_rows]
+            dates = [str(r[0]) for r in all_rows]
+            
+            calc_len = min(5, len(all_rows) - 4)
+            for i in range(len(all_rows) - calc_len, len(all_rows)):
+                window = closes[i-4 : i+1]
+                ma5 = sum(window) / 5.0
+                close = closes[i]
+                bias = ((close - ma5) / ma5) * 100.0
                 
-                calc_len = min(5, len(all_rows) - 4)
-                for i in range(len(all_rows) - calc_len, len(all_rows)):
-                    window = closes[i-4 : i+1]
-                    ma5 = sum(window) / 5.0
-                    close = closes[i]
-                    bias = ((close - ma5) / ma5) * 100.0
-                    
-                    d_parts = dates[i].split('/')
-                    m_d = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
-                    bias_map[m_d] = f"{bias:+.2f}%"
+                d_parts = dates[i].split('/')
+                m_d = f"{int(d_parts[1]):02d}/{int(d_parts[2]):02d}"
+                bias_map[m_d] = f"{bias:+.2f}%"
     except Exception as e:
-        print(f"大盤資料抓取異常: {e}")
+        print(f"大盤資料與乖離率解析異常: {e}")
 
     return turnover_map, twse_days_list, bias_map
 
@@ -143,7 +170,7 @@ def get_histock_three_and_futures_5days():
                                 inst_map[m_d] = f"{net_float:+.2f}億"
                             except ValueError:
                                 inst_map[m_d] = f"{net_str}億"
-                        if len(inst_map) >= 5:
+                        if len(inst_map) >= 10:
                             break
 
             # 2. 期貨未平倉
@@ -171,7 +198,7 @@ def get_histock_three_and_futures_5days():
                                     futures_map[m_d] = f"多單:{foreign_val:,}口"
                             except ValueError:
                                 futures_map[m_d] = f"{foreign_str}口"
-                        if len(futures_map) >= 5:
+                        if len(futures_map) >= 10:
                             break
     except Exception as e:
         print(f"HiStock 現貨/期貨抓取異常: {e}")
@@ -219,7 +246,7 @@ def get_tse_market_rankings():
     return buy_top10, sell_top10
 
 def get_otc_market_rankings():
-    """櫃買中心上櫃三大法人合計買賣超（全例外捕獲保護）"""
+    """櫃買中心上櫃三大法人合計買超/賣超（含備援與全例外防禦）"""
     today = datetime.date.today()
     roc_year = today.year - 1911
     d_query = f"{roc_year}/{today.month:02d}/{today.day:02d}"
@@ -265,9 +292,9 @@ def get_otc_market_rankings():
                         sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
                     return buy_top10, sell_top10
     except Exception as e:
-        print(f"通道 1 異常: {e}")
+        print(f"上櫃通道 1 異常: {e}")
 
-    # 通道 2（HTML 解析備援）
+    # 通道 2（HTML 備援）
     try:
         alt_url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=htm&d={roc_year}/{today.month}/{today.day}&se=EW&t=D"
         alt_res = requests.get(alt_url, headers=headers, timeout=10)
@@ -294,7 +321,7 @@ def get_otc_market_rankings():
                 for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
                     sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
     except Exception as e:
-        print(f"通道 2 備援異常: {e}")
+        print(f"上櫃通道 2 備援異常: {e}")
 
     return buy_top10, sell_top10
 
