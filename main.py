@@ -59,6 +59,7 @@ def get_twse_market_data_and_bias():
     twse_days_list = []
     bias_map = {}
 
+    # 1. 當日純撮合成交量（排除鉅額）
     today_pure_billion = None
     try:
         url_mi = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&response=json"
@@ -75,6 +76,7 @@ def get_twse_market_data_and_bias():
     except Exception as e:
         print(f"MI_INDEX 成交量抓取異常: {e}")
 
+    # 2. 抓取當月成交紀錄（FMTQIK）
     all_rows = []
     try:
         url_curr = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
@@ -84,6 +86,7 @@ def get_twse_market_data_and_bias():
     except Exception as e:
         print(f"當月 FMTQIK 抓取異常: {e}")
 
+    # 3. 跨月自動補齊
     if len(all_rows) < 8:
         first_of_this_month = today.replace(day=1)
         last_day_prev_month = first_of_this_month - datetime.timedelta(days=1)
@@ -96,6 +99,7 @@ def get_twse_market_data_and_bias():
         except Exception as e:
             print(f"上月 FMTQIK 補齊異常: {e}")
 
+    # 4. 解析大盤量與 5MA 乖離率
     try:
         if len(all_rows) >= 5:
             recent_5_rows = all_rows[-5:][::-1]
@@ -130,16 +134,21 @@ def get_twse_market_data_and_bias():
 
 def get_taifex_fx_rate_5days():
     """
-    抓取中央銀行/外匯市場每日 16:00 收盤之近 5 日新台幣/美元匯率，並計算每日漲跌幅
+    抓取近 5 日新台幣/美元匯率及漲跌：
+    優先抓取期交所 OpenAPI；若當日尚未入庫，自動啟動備援通道補齊 16:00 收盤價。
     """
-    url = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    today = datetime.date.today()
+    today_md = f"{today.month:02d}/{today.day:02d}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     fx_map = {}
+    valid_list = []
+
+    # 通道 1：期交所 OpenAPI
     try:
+        url = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            valid_list = []
             for item in data:
                 date_str = str(item.get("Date", "")).strip()
                 usd_ntd = str(item.get("USD/NTD", "")).strip()
@@ -150,26 +159,54 @@ def get_taifex_fx_rate_5days():
                         valid_list.append((m_d, rate_val))
                     except ValueError:
                         continue
-
-            if len(valid_list) >= 6:
-                # 取最後 6 筆以計算近 5 日每筆與前一日的漲跌
-                target_6 = valid_list[-6:]
-                for i in range(1, len(target_6)):
-                    curr_d, curr_r = target_6[i]
-                    prev_d, prev_r = target_6[i - 1]
-                    diff = round(curr_r - prev_r, 4)
-                    
-                    # 匯率數值變小為新台幣升值(🟢)，變大為貶值(🔴)
-                    if diff < -0.0001:
-                        chg_str = f"(升{abs(diff):.3f}) 🟢"
-                    elif diff > 0.0001:
-                        chg_str = f"(貶{abs(diff):.3f}) 🔴"
-                    else:
-                        chg_str = "(平盤) ⚪"
-                    
-                    fx_map[curr_d] = f"匯率:{curr_r:.3f} {chg_str}"
     except Exception as e:
-        print(f"外匯匯率 API 抓取異常: {e}")
+        print(f"期交所外匯 API 異常: {e}")
+
+    # 檢查今日資料是否已入庫；若未入庫，啟動備援抓取當日收盤價
+    has_today = any(d == today_md for d, _ in valid_list)
+    if not has_today:
+        try:
+            url_fx_backup = "https://tw.stock.yahoo.com/currencies"
+            res_b = requests.get(url_fx_backup, headers=headers, timeout=10)
+            if res_b.status_code == 200:
+                soup = BeautifulSoup(res_b.text, "html.parser")
+                for row in soup.find_all("li"):
+                    txt = row.get_text()
+                    if "美元/新台幣" in txt or "USD/TWD" in txt:
+                        spans = [s.get_text(strip=True) for s in row.find_all("span") if s.get_text(strip=True)]
+                        for s in spans:
+                            try:
+                                val = float(s)
+                                if 28.0 <= val <= 36.0:
+                                    valid_list.append((today_md, val))
+                                    break
+                            except ValueError:
+                                continue
+                        break
+        except Exception as e:
+            print(f"外匯備援通道異常: {e}")
+
+    # 計算近 5 日各日與前一日之漲跌
+    try:
+        if len(valid_list) >= 6:
+            target_list = valid_list[-6:]
+            for i in range(1, len(target_list)):
+                curr_d, curr_r = target_list[i]
+                prev_d, prev_r = target_list[i - 1]
+                diff = round(curr_r - prev_r, 4)
+                
+                # 數值下降為新台幣升值(🟢)，上升為貶值(🔴)
+                if diff < -0.0001:
+                    chg_str = f"(升{abs(diff):.3f}) 🟢"
+                elif diff > 0.0001:
+                    chg_str = f"(貶{abs(diff):.3f}) 🔴"
+                else:
+                    chg_str = "(平盤) ⚪"
+                
+                fx_map[curr_d] = f"匯率:{curr_r:.3f} {chg_str}"
+    except Exception as e:
+        print(f"匯率漲跌計算異常: {e}")
+
     return fx_map
 
 def get_histock_three_and_futures_5days():
@@ -386,7 +423,7 @@ def build_message():
     msg += "💵【近5日新台幣/美元匯率】\n"
     msg += "─" * 22 + "\n"
     for d in twse_days_list:
-        fx_label = fx_map.get(d, "計算中")
+        fx_label = fx_map.get(d, "匯率:計算中")
         msg += f"{d} {fx_label}\n"
     msg += "─" * 22 + "\n\n"
 
