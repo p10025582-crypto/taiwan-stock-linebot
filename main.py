@@ -22,7 +22,6 @@ def is_trading_day():
         res = requests.get(url, headers=headers, timeout=10).json()
         if res.get("stat") == "OK" and "data" in res and len(res["data"]) > 0:
             last_record_date = str(res["data"][-1][0]).strip()
-            # 比對最新交易日是否為今天
             if last_record_date == today_roc_str:
                 return True
     except Exception as e:
@@ -51,7 +50,7 @@ def send_line_message(text):
 def get_twse_market_data_and_bias():
     """
     抓取大盤成交量與近 5 日 5MA 乖離率。
-    具備「跨月份自動拼接」功能：當月資料不足 5 筆時，自動向前抓取上月補齊。
+    具備「跨月份自動拼接」功能：當月資料不足 8 筆時，自動向前抓取上月補齊。
     """
     today = datetime.date.today()
     date_str = today.strftime("%Y%m%d")
@@ -60,7 +59,6 @@ def get_twse_market_data_and_bias():
     twse_days_list = []
     bias_map = {}
 
-    # 1. 當日純撮合成交量（排除鉅額）
     today_pure_billion = None
     try:
         url_mi = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&response=json"
@@ -77,7 +75,6 @@ def get_twse_market_data_and_bias():
     except Exception as e:
         print(f"MI_INDEX 成交量抓取異常: {e}")
 
-    # 2. 抓取當月成交紀錄（FMTQIK）
     all_rows = []
     try:
         url_curr = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
@@ -87,9 +84,7 @@ def get_twse_market_data_and_bias():
     except Exception as e:
         print(f"當月 FMTQIK 抓取異常: {e}")
 
-    # 3. 跨月自動補足機制：若當月交易日小於 8 天，自動抓取上月補足資料供計算 5MA 與連續 5 日對照
     if len(all_rows) < 8:
-        # 計算上個月的最後一天日期
         first_of_this_month = today.replace(day=1)
         last_day_prev_month = first_of_this_month - datetime.timedelta(days=1)
         prev_date_str = last_day_prev_month.strftime("%Y%m%d")
@@ -97,12 +92,10 @@ def get_twse_market_data_and_bias():
             url_prev = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={prev_date_str}&response=json"
             res_prev = requests.get(url_prev, headers=headers, timeout=10).json()
             if res_prev.get("stat") == "OK" and "data" in res_prev:
-                # 將上個月的資料放在前面，拼接當月資料
                 all_rows = res_prev["data"] + all_rows
         except Exception as e:
             print(f"上月 FMTQIK 補齊異常: {e}")
 
-    # 4. 解析近 5 日大盤量與 5MA 乖離率
     try:
         if len(all_rows) >= 5:
             recent_5_rows = all_rows[-5:][::-1]
@@ -134,6 +127,50 @@ def get_twse_market_data_and_bias():
         print(f"大盤資料與乖離率解析異常: {e}")
 
     return turnover_map, twse_days_list, bias_map
+
+def get_taifex_fx_rate_5days():
+    """
+    抓取中央銀行/外匯市場每日 16:00 收盤之近 5 日新台幣/美元匯率，並計算每日漲跌幅
+    """
+    url = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    fx_map = {}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            valid_list = []
+            for item in data:
+                date_str = str(item.get("Date", "")).strip()
+                usd_ntd = str(item.get("USD/NTD", "")).strip()
+                if len(date_str) == 8 and usd_ntd:
+                    try:
+                        rate_val = float(usd_ntd)
+                        m_d = f"{int(date_str[4:6]):02d}/{int(date_str[6:8]):02d}"
+                        valid_list.append((m_d, rate_val))
+                    except ValueError:
+                        continue
+
+            if len(valid_list) >= 6:
+                # 取最後 6 筆以計算近 5 日每筆與前一日的漲跌
+                target_6 = valid_list[-6:]
+                for i in range(1, len(target_6)):
+                    curr_d, curr_r = target_6[i]
+                    prev_d, prev_r = target_6[i - 1]
+                    diff = round(curr_r - prev_r, 4)
+                    
+                    # 匯率數值變小為新台幣升值(🟢)，變大為貶值(🔴)
+                    if diff < -0.0001:
+                        chg_str = f"(升{abs(diff):.3f}) 🟢"
+                    elif diff > 0.0001:
+                        chg_str = f"(貶{abs(diff):.3f}) 🔴"
+                    else:
+                        chg_str = "(平盤) ⚪"
+                    
+                    fx_map[curr_d] = f"匯率:{curr_r:.3f} {chg_str}"
+    except Exception as e:
+        print(f"外匯匯率 API 抓取異常: {e}")
+    return fx_map
 
 def get_histock_three_and_futures_5days():
     url = "https://histock.tw/stock/three.aspx?m=three"
@@ -328,6 +365,7 @@ def get_otc_market_rankings():
 def build_message():
     today_str = datetime.date.today().strftime("%Y/%m/%d")
     twse_map, twse_days_list, bias_map = get_twse_market_data_and_bias()
+    fx_map = get_taifex_fx_rate_5days()
     inst_map, futures_map = get_histock_three_and_futures_5days()
     tse_buy, tse_sell = get_tse_market_rankings()
     otc_buy, otc_sell = get_otc_market_rankings()
@@ -342,6 +380,14 @@ def build_message():
         turnover = twse_map.get(d, 0.0)
         inst_net = inst_map.get(d, "已結算")
         msg += f"{d} 大盤:{turnover}億 | 法人:{inst_net}\n"
+    msg += "─" * 22 + "\n\n"
+
+    # --- 近5日新台幣/美元匯率 ---
+    msg += "💵【近5日新台幣/美元匯率】\n"
+    msg += "─" * 22 + "\n"
+    for d in twse_days_list:
+        fx_label = fx_map.get(d, "計算中")
+        msg += f"{d} {fx_label}\n"
     msg += "─" * 22 + "\n\n"
 
     # --- 近5日台指期外資未平倉淨空單 ---
