@@ -135,15 +135,17 @@ def get_twse_market_data_and_bias():
 def get_taifex_fx_rate_5days():
     """
     抓取近 5 日新台幣/美元匯率及漲跌：
-    優先抓取期交所 OpenAPI；若當日尚未入庫，自動啟動備援通道補齊 16:00 收盤價。
+    優先抓取期交所官方 OpenAPI；若當日尚未更新，自動以臺灣銀行官方收盤牌告 CSV 備援補齊。
     """
     today = datetime.date.today()
     today_md = f"{today.month:02d}/{today.day:02d}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
     fx_map = {}
     valid_list = []
 
-    # 通道 1：期交所 OpenAPI
+    # 通道 1：期交所官方 OpenAPI
     try:
         url = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
         res = requests.get(url, headers=headers, timeout=10)
@@ -162,29 +164,26 @@ def get_taifex_fx_rate_5days():
     except Exception as e:
         print(f"期交所外匯 API 異常: {e}")
 
-    # 檢查今日資料是否已入庫；若未入庫，啟動備援抓取當日收盤價
+    # 檢查今日資料是否已入庫；若未入庫，啟動通道 2（臺灣銀行官方收盤牌告 CSV）
     has_today = any(d == today_md for d, _ in valid_list)
     if not has_today:
         try:
-            url_fx_backup = "https://tw.stock.yahoo.com/currencies"
-            res_b = requests.get(url_fx_backup, headers=headers, timeout=10)
-            if res_b.status_code == 200:
-                soup = BeautifulSoup(res_b.text, "html.parser")
-                for row in soup.find_all("li"):
-                    txt = row.get_text()
-                    if "美元/新台幣" in txt or "USD/TWD" in txt:
-                        spans = [s.get_text(strip=True) for s in row.find_all("span") if s.get_text(strip=True)]
-                        for s in spans:
-                            try:
-                                val = float(s)
-                                if 28.0 <= val <= 36.0:
-                                    valid_list.append((today_md, val))
-                                    break
-                            except ValueError:
-                                continue
+            url_bot = "https://rate.bot.com.tw/xrt/flcsv/0/day"
+            res_bot = requests.get(url_bot, headers=headers, timeout=10)
+            if res_bot.status_code == 200:
+                lines = res_bot.text.splitlines()
+                for line in lines:
+                    cols = line.split(",")
+                    if len(cols) >= 14 and cols[0].strip() == "USD":
+                        # 取即期買入與賣出中價作為公允代表匯率
+                        buy_rate = float(cols[12].strip())
+                        sell_rate = float(cols[13].strip())
+                        mid_rate = round((buy_rate + sell_rate) / 2.0, 3)
+                        valid_list.append((today_md, mid_rate))
+                        print(f"成功透過臺灣銀行牌告補齊今日匯率: {mid_rate}")
                         break
         except Exception as e:
-            print(f"外匯備援通道異常: {e}")
+            print(f"臺灣銀行牌告備援異常: {e}")
 
     # 計算近 5 日各日與前一日之漲跌
     try:
