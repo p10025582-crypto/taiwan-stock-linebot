@@ -1,13 +1,13 @@
-name: Daily Stock Push
+name: Daily Stock Line Push
 
 on:
   schedule:
-    # 台灣時間週一至週五 17:33 執行 (對應 UTC 09:33)，避開整點與半點尖峰排隊
-    - cron: '45 9 * * 1-5'
+    # 台灣時間週一至週五 17:55（對應 UTC 09:55）自動執行
+    - cron: '55 9 * * 1-5'
   workflow_dispatch: # 保留手動測試按鈕
 
 jobs:
-  stock_push:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -22,8 +22,8 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      - name: Run Script
+      - name: Run Stock Script
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: python main.py
+        run: |
+          python main.py
