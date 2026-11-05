@@ -59,7 +59,6 @@ def get_twse_market_data_and_bias():
     twse_days_list = []
     bias_map = {}
 
-    # 1. 當日純撮合成交量（排除鉅額）
     today_pure_billion = None
     try:
         url_mi = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&response=json"
@@ -76,7 +75,6 @@ def get_twse_market_data_and_bias():
     except Exception as e:
         print(f"MI_INDEX 成交量抓取異常: {e}")
 
-    # 2. 抓取當月成交紀錄（FMTQIK）
     all_rows = []
     try:
         url_curr = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={date_str}&response=json"
@@ -86,7 +84,6 @@ def get_twse_market_data_and_bias():
     except Exception as e:
         print(f"當月 FMTQIK 抓取異常: {e}")
 
-    # 3. 跨月自動補齊
     if len(all_rows) < 8:
         first_of_this_month = today.replace(day=1)
         last_day_prev_month = first_of_this_month - datetime.timedelta(days=1)
@@ -99,7 +96,6 @@ def get_twse_market_data_and_bias():
         except Exception as e:
             print(f"上月 FMTQIK 補齊異常: {e}")
 
-    # 4. 解析大盤量與 5MA 乖離率
     try:
         if len(all_rows) >= 5:
             recent_5_rows = all_rows[-5:][::-1]
@@ -135,7 +131,7 @@ def get_twse_market_data_and_bias():
 def get_taifex_fx_rate_5days():
     """
     抓取近 5 日新台幣/美元匯率及漲跌：
-    優先抓取期交所官方 OpenAPI；若當日尚未更新，自動以臺灣銀行官方收盤牌告 CSV 備援補齊。
+    優先抓取期交所官方 OpenAPI；若當日尚未入庫，自動調用 Yahoo Finance 官方 JSON 端點補齊。
     """
     today = datetime.date.today()
     today_md = f"{today.month:02d}/{today.day:02d}"
@@ -164,26 +160,22 @@ def get_taifex_fx_rate_5days():
     except Exception as e:
         print(f"期交所外匯 API 異常: {e}")
 
-    # 檢查今日資料是否已入庫；若未入庫，啟動通道 2（臺灣銀行官方收盤牌告 CSV）
+    # 檢查今日資料是否已入庫；若未入庫，啟動通道 2（Yahoo Finance 免阻擋即時收盤 JSON 端點）
     has_today = any(d == today_md for d, _ in valid_list)
     if not has_today:
         try:
-            url_bot = "https://rate.bot.com.tw/xrt/flcsv/0/day"
-            res_bot = requests.get(url_bot, headers=headers, timeout=10)
-            if res_bot.status_code == 200:
-                lines = res_bot.text.splitlines()
-                for line in lines:
-                    cols = line.split(",")
-                    if len(cols) >= 14 and cols[0].strip() == "USD":
-                        # 取即期買入與賣出中價作為公允代表匯率
-                        buy_rate = float(cols[12].strip())
-                        sell_rate = float(cols[13].strip())
-                        mid_rate = round((buy_rate + sell_rate) / 2.0, 3)
-                        valid_list.append((today_md, mid_rate))
-                        print(f"成功透過臺灣銀行牌告補齊今日匯率: {mid_rate}")
-                        break
+            url_yf = "https://query1.finance.yahoo.com/v8/finance/chart/USDTWD=X?range=1d&interval=1d"
+            res_yf = requests.get(url_yf, headers=headers, timeout=10)
+            if res_yf.status_code == 200:
+                yf_data = res_yf.json()
+                meta = yf_data.get("chart", {}).get("result", [{}])[0].get("meta", {})
+                current_rate = meta.get("regularMarketPrice")
+                if current_rate and 28.0 <= float(current_rate) <= 38.0:
+                    mid_rate = round(float(current_rate), 3)
+                    valid_list.append((today_md, mid_rate))
+                    print(f"成功透過 Yahoo Finance 補齊今日匯率: {mid_rate}")
         except Exception as e:
-            print(f"臺灣銀行牌告備援異常: {e}")
+            print(f"Yahoo Finance 備援通道異常: {e}")
 
     # 計算近 5 日各日與前一日之漲跌
     try:
@@ -410,7 +402,7 @@ def build_message():
     msg += f"📅 日期：{today_str}\n\n"
 
     # --- 近5日大盤量與三大法人買賣超 ---
-    msg += "🏛️【近5日大盤量與三大法人動向】\n"
+    msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
     msg += "─" * 22 + "\n"
     for d in twse_days_list:
         turnover = twse_map.get(d, 0.0)
