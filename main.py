@@ -402,7 +402,7 @@ def build_message():
     msg += f"📅 日期：{today_str}\n\n"
 
     # --- 近5日大盤量與三大法人買賣超 ---
-    msg += "🏛️ 【近5日大盤量與三大法人動向】\n"
+    msg += "🏛️【近5日大盤量與三大法人動向】\n"
     msg += "─" * 22 + "\n"
     for d in twse_days_list:
         turnover = twse_map.get(d, 0.0)
@@ -450,7 +450,11 @@ def build_message():
 
     # --- 官股查詢直達連結 ---
     msg += "🏛️【八大官股即時動向查詢】\n"
-    msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
+    msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount\n\n"
+
+    # --- 上市及上櫃融資維持率查詢連結 ---
+    msg += "⚖️【上市及上櫃融資餘額】\n"
+    msg += "https://reurl.cc/Xxzm8D"
 
     return msg
 
