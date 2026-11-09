@@ -130,8 +130,10 @@ def get_twse_market_data_and_bias():
 
 def get_taifex_fx_rate_5days():
     """
-    抓取近 5 日新台幣/美元匯率及漲跌：
-    優先抓取期交所官方 OpenAPI；若當日尚未入庫，自動調用 Yahoo Finance 官方 JSON 端點補齊。
+    抓取近 5 日新台幣/美元匯率及漲跌（三層備援機制）：
+    1. 第一通道：期交所官方 OpenAPI
+    2. 第二通道：中央銀行官方每日收盤匯率網頁 (cbc.gov.tw)
+    3. 第三通道：Yahoo Finance 即時收盤 JSON 端點
     """
     today = datetime.date.today()
     today_md = f"{today.month:02d}/{today.day:02d}"
@@ -141,7 +143,7 @@ def get_taifex_fx_rate_5days():
     fx_map = {}
     valid_list = []
 
-    # 通道 1：期交所官方 OpenAPI
+    # 第一通道：期交所官方 OpenAPI
     try:
         url = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
         res = requests.get(url, headers=headers, timeout=10)
@@ -158,10 +160,42 @@ def get_taifex_fx_rate_5days():
                     except ValueError:
                         continue
     except Exception as e:
-        print(f"期交所外匯 API 異常: {e}")
+        print(f"第一通道（期交所外匯 API）異常: {e}")
 
-    # 檢查今日資料是否已入庫；若未入庫，啟動通道 2（Yahoo Finance 免阻擋即時收盤 JSON 端點）
+    # 第二通道：中央銀行官方每日收盤匯率網頁
     has_today = any(d == today_md for d, _ in valid_list)
+    if not has_today:
+        try:
+            url_cbc = "https://www.cbc.gov.tw/tw/lp-645-1.html"
+            res_cbc = requests.get(url_cbc, headers=headers, timeout=10)
+            if res_cbc.status_code == 200:
+                soup = BeautifulSoup(res_cbc.text, "html.parser")
+                roc_year = today.year - 1911
+                today_roc_slash = f"{roc_year}/{today.month:02d}/{today.day:02d}"
+                today_roc_dash = f"{roc_year}-{today.month:02d}-{today.day:02d}"
+                today_ad_slash = f"{today.year}/{today.month:02d}/{today.day:02d}"
+
+                for tr in soup.find_all("tr"):
+                    row_text = tr.get_text(" ", strip=True)
+                    if any(dt in row_text for dt in [today_roc_slash, today_roc_dash, today_ad_slash, today_md]):
+                        tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                        for cell in tds:
+                            try:
+                                val = float(cell.replace(",", ""))
+                                if 25.0 <= val <= 38.0:
+                                    mid_rate = round(val, 3)
+                                    valid_list.append((today_md, mid_rate))
+                                    has_today = True
+                                    print(f"第二通道成功：透過中央銀行網頁補齊今日匯率 {mid_rate}")
+                                    break
+                            except ValueError:
+                                continue
+                    if has_today:
+                        break
+        except Exception as e:
+            print(f"第二通道（中央銀行網頁）異常: {e}")
+
+    # 第三通道：Yahoo Finance 免阻擋即時收盤 JSON 端點（最終防線）
     if not has_today:
         try:
             url_yf = "https://query1.finance.yahoo.com/v8/finance/chart/USDTWD=X?range=1d&interval=1d"
@@ -170,12 +204,12 @@ def get_taifex_fx_rate_5days():
                 yf_data = res_yf.json()
                 meta = yf_data.get("chart", {}).get("result", [{}])[0].get("meta", {})
                 current_rate = meta.get("regularMarketPrice")
-                if current_rate and 28.0 <= float(current_rate) <= 38.0:
+                if current_rate and 25.0 <= float(current_rate) <= 38.0:
                     mid_rate = round(float(current_rate), 3)
                     valid_list.append((today_md, mid_rate))
-                    print(f"成功透過 Yahoo Finance 補齊今日匯率: {mid_rate}")
+                    print(f"第三通道成功：透過 Yahoo Finance 補齊今日匯率 {mid_rate}")
         except Exception as e:
-            print(f"Yahoo Finance 備援通道異常: {e}")
+            print(f"第三通道（Yahoo Finance）異常: {e}")
 
     # 計算近 5 日各日與前一日之漲跌
     try:
