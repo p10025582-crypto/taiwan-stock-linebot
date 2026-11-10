@@ -345,7 +345,7 @@ def get_tse_market_rankings():
     return buy_top10, sell_top10
 
 def get_otc_market_rankings():
-    """櫃買中心上櫃三大法人合計買超/賣超（含備援與全例外防禦）"""
+    """櫃買中心上櫃三大法人合計買超/賣超（含跨網域三層備援與全例外防禦）"""
     today = datetime.date.today()
     roc_year = today.year - 1911
     d_query = f"{roc_year}/{today.month:02d}/{today.day:02d}"
@@ -357,10 +357,10 @@ def get_otc_market_rankings():
 
     buy_top10, sell_top10 = [], []
 
-    # 通道 1：櫃買中心官方日報
+    # 通道 1：櫃買中心官方日報 JSON（timeout 放寬至 15 秒）
     try:
         url_tpex = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={d_query}"
-        res = requests.get(url_tpex, headers=headers, timeout=10)
+        res = requests.get(url_tpex, headers=headers, timeout=15)
         if res.status_code == 200:
             data_json = res.json()
             rows = data_json.get("aaData", [])
@@ -393,10 +393,10 @@ def get_otc_market_rankings():
     except Exception as e:
         print(f"上櫃通道 1 異常: {e}")
 
-    # 通道 2（HTML 備援）
+    # 通道 2：櫃買中心 HTML 備援（timeout 放寬至 15 秒）
     try:
         alt_url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=htm&d={roc_year}/{today.month}/{today.day}&se=EW&t=D"
-        alt_res = requests.get(alt_url, headers=headers, timeout=10)
+        alt_res = requests.get(alt_url, headers=headers, timeout=15)
         if alt_res.status_code == 200:
             soup = BeautifulSoup(alt_res.text, "html.parser")
             stock_data = []
@@ -419,8 +419,42 @@ def get_otc_market_rankings():
                     buy_top10.append(f"{idx}. {name} ({sheets:+,}張)")
                 for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
                     sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
+                return buy_top10, sell_top10
     except Exception as e:
         print(f"上櫃通道 2 備援異常: {e}")
+
+    # 通道 3：跨網域第三方備援（HiStock 上櫃三大法人買賣超）
+    try:
+        histock_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        }
+        url_hs = "https://histock.tw/stock/three.aspx?m=otc"
+        res_hs = requests.get(url_hs, headers=histock_headers, timeout=15)
+        if res_hs.status_code == 200:
+            soup_hs = BeautifulSoup(res_hs.text, "html.parser")
+            stock_data = []
+            for r in soup_hs.find_all("tr"):
+                tds = [td.get_text(strip=True) for td in r.find_all("td")]
+                if len(tds) >= 5:
+                    code = tds[0].strip()
+                    name = tds[1].strip()
+                    if not is_pure_stock(code, name):
+                        continue
+                    try:
+                        val_str = tds[-1].replace(",", "").replace("+", "").strip()
+                        sheets = int(float(val_str))
+                        stock_data.append((name, sheets))
+                    except Exception:
+                        continue
+            if stock_data:
+                stock_data.sort(key=lambda x: x[1], reverse=True)
+                for idx, (name, sheets) in enumerate(stock_data[:10], 1):
+                    buy_top10.append(f"{idx}. {name} ({sheets:+,}張)")
+                for idx, (name, sheets) in enumerate(stock_data[-10:][::-1], 1):
+                    sell_top10.append(f"{idx}. {name} ({sheets:+,}張)")
+                print("上櫃通道 3（HiStock 跨網域備援）成功取得資料")
+    except Exception as e:
+        print(f"上櫃通道 3 備援異常: {e}")
 
     return buy_top10, sell_top10
 
@@ -487,7 +521,7 @@ def build_message():
     msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount\n\n"
 
     # --- 上市及上櫃融資維持率查詢連結 ---
-    msg += "⚖️【上市及上櫃融資餘額】\n"
+    msg += "⚖️【上市及上櫃融資維持率】\n"
     msg += "https://reurl.cc/Xxzm8D"
 
     return msg
