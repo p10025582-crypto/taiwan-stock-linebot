@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import requests
 import datetime
@@ -130,96 +131,113 @@ def get_twse_market_data_and_bias():
 
 def get_taifex_fx_rate_5days():
     """
-    抓取近 5 日新台幣/美元匯率及漲跌（三層備援機制）：
-    1. 第一通道：期交所官方 OpenAPI
-    2. 第二通道：中央銀行官方每日收盤匯率網頁 (cbc.gov.tw)
-    3. 第三通道：Yahoo Finance 即時收盤 JSON 端點
+    抓取近 5 日新台幣/美元匯率及漲跌（央行優先、期交所次之、Yahoo Finance 殿後）：
+    1. 第一通道：中央銀行官方每日收盤匯率網頁 (cbc.gov.tw)
+    2. 第二通道：期交所官方 OpenAPI
+    3. 第三通道：Yahoo Finance 1個月歷史與即時收盤 JSON 端點（僅補齊官方缺漏之日期）
     """
     today = datetime.date.today()
-    today_md = f"{today.month:02d}/{today.day:02d}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
     fx_map = {}
-    valid_list = []
+    rate_records = {} # key: date_obj, value: rate_val
 
-    # 第一通道：期交所官方 OpenAPI
+    # 第一通道：中央銀行官方每日收盤匯率網頁
     try:
-        url = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            for item in data:
-                date_str = str(item.get("Date", "")).strip()
-                usd_ntd = str(item.get("USD/NTD", "")).strip()
-                if len(date_str) == 8 and usd_ntd:
-                    try:
-                        rate_val = float(usd_ntd)
-                        m_d = f"{int(date_str[4:6]):02d}/{int(date_str[6:8]):02d}"
-                        valid_list.append((m_d, rate_val))
-                    except ValueError:
-                        continue
-    except Exception as e:
-        print(f"第一通道（期交所外匯 API）異常: {e}")
-
-    # 第二通道：中央銀行官方每日收盤匯率網頁
-    has_today = any(d == today_md for d, _ in valid_list)
-    if not has_today:
-        try:
-            url_cbc = "https://www.cbc.gov.tw/tw/lp-645-1.html"
-            res_cbc = requests.get(url_cbc, headers=headers, timeout=10)
-            if res_cbc.status_code == 200:
-                soup = BeautifulSoup(res_cbc.text, "html.parser")
-                roc_year = today.year - 1911
-                today_roc_slash = f"{roc_year}/{today.month:02d}/{today.day:02d}"
-                today_roc_dash = f"{roc_year}-{today.month:02d}-{today.day:02d}"
-                today_ad_slash = f"{today.year}/{today.month:02d}/{today.day:02d}"
-
-                for tr in soup.find_all("tr"):
-                    row_text = tr.get_text(" ", strip=True)
-                    if any(dt in row_text for dt in [today_roc_slash, today_roc_dash, today_ad_slash, today_md]):
-                        tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                        for cell in tds:
+        url_cbc = "https://www.cbc.gov.tw/tw/lp-645-1.html"
+        res_cbc = requests.get(url_cbc, headers=headers, timeout=10)
+        if res_cbc.status_code == 200:
+            soup = BeautifulSoup(res_cbc.text, "html.parser")
+            for tr in soup.find_all("tr"):
+                tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if len(tds) >= 2:
+                    d_obj = None
+                    rate_val = None
+                    for cell in tds:
+                        m_date = re.search(r'(\d{2,4})[/-](\d{1,2})[/-](\d{1,2})', cell)
+                        if m_date and not d_obj:
+                            y, m, d = int(m_date.group(1)), int(m_date.group(2)), int(m_date.group(3))
+                            if y < 1911:
+                                y += 1911
                             try:
-                                val = float(cell.replace(",", ""))
-                                if 25.0 <= val <= 38.0:
-                                    mid_rate = round(val, 3)
-                                    valid_list.append((today_md, mid_rate))
-                                    has_today = True
-                                    print(f"第二通道成功：透過中央銀行網頁補齊今日匯率 {mid_rate}")
-                                    break
+                                d_obj = datetime.date(y, m, d)
                             except ValueError:
-                                continue
-                    if has_today:
-                        break
-        except Exception as e:
-            print(f"第二通道（中央銀行網頁）異常: {e}")
+                                pass
+                        try:
+                            val = float(cell.replace(",", ""))
+                            if 25.0 <= val <= 38.0:
+                                rate_val = round(val, 3)
+                        except ValueError:
+                            continue
+                    if d_obj and rate_val:
+                        rate_records[d_obj] = rate_val
+            if rate_records:
+                print(f"第一通道（中央銀行網頁）成功取得 {len(rate_records)} 筆匯率資料")
+    except Exception as e:
+        print(f"第一通道（中央銀行網頁）異常: {e}")
 
-    # 第三通道：Yahoo Finance 免阻擋即時收盤 JSON 端點（最終防線）
-    if not has_today:
+    # 第二通道：期交所官方 OpenAPI（若央行網頁缺少今日或歷史筆數不足 6 筆）
+    if today not in rate_records or len(rate_records) < 6:
         try:
-            url_yf = "https://query1.finance.yahoo.com/v8/finance/chart/USDTWD=X?range=1d&interval=1d"
+            url = "https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates"
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                for item in data:
+                    date_str = str(item.get("Date", "")).strip()
+                    usd_ntd = str(item.get("USD/NTD", "")).strip()
+                    if len(date_str) == 8 and usd_ntd:
+                        try:
+                            d_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
+                            rate_val = float(usd_ntd)
+                            if d_obj not in rate_records:
+                                rate_records[d_obj] = rate_val
+                        except ValueError:
+                            continue
+                print("第二通道（期交所外匯 API）已完成補齊")
+        except Exception as e:
+            print(f"第二通道（期交所外匯 API）異常: {e}")
+
+    # 第三通道：Yahoo Finance 1個月端點（僅當官方仍缺少今日或歷史筆數不足 6 筆時補齊）
+    if today not in rate_records or len(rate_records) < 6:
+        try:
+            url_yf = "https://query1.finance.yahoo.com/v8/finance/chart/USDTWD=X?range=1mo&interval=1d"
             res_yf = requests.get(url_yf, headers=headers, timeout=10)
             if res_yf.status_code == 200:
                 yf_data = res_yf.json()
-                meta = yf_data.get("chart", {}).get("result", [{}])[0].get("meta", {})
-                current_rate = meta.get("regularMarketPrice")
-                if current_rate and 25.0 <= float(current_rate) <= 38.0:
-                    mid_rate = round(float(current_rate), 3)
-                    valid_list.append((today_md, mid_rate))
-                    print(f"第三通道成功：透過 Yahoo Finance 補齊今日匯率 {mid_rate}")
+                result = yf_data.get("chart", {}).get("result", [{}])[0]
+                timestamps = result.get("timestamp", [])
+                closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                tz_tw = datetime.timezone(datetime.timedelta(hours=8))
+
+                for ts, c_val in zip(timestamps, closes):
+                    if c_val is not None and 25.0 <= float(c_val) <= 38.0:
+                        d_obj = datetime.datetime.fromtimestamp(ts, tz_tw).date()
+                        if d_obj not in rate_records:
+                            rate_records[d_obj] = round(float(c_val), 3)
+
+                if today not in rate_records:
+                    meta = result.get("meta", {})
+                    current_rate = meta.get("regularMarketPrice")
+                    if current_rate and 25.0 <= float(current_rate) <= 38.0:
+                        rate_records[today] = round(float(current_rate), 3)
+                print("第三通道（Yahoo Finance）已補齊缺漏之匯率資料")
         except Exception as e:
             print(f"第三通道（Yahoo Finance）異常: {e}")
 
-    # 計算近 5 日各日與前一日之漲跌
+    # 依日期排序並計算近 5 日各日與前一日之漲跌
     try:
-        if len(valid_list) >= 6:
-            target_list = valid_list[-6:]
-            for i in range(1, len(target_list)):
-                curr_d, curr_r = target_list[i]
-                prev_d, prev_r = target_list[i - 1]
+        sorted_dates = sorted(rate_records.keys())
+        if len(sorted_dates) >= 2:
+            target_dates = sorted_dates[-6:]
+            for i in range(1, len(target_dates)):
+                curr_d_obj = target_dates[i]
+                prev_d_obj = target_dates[i - 1]
+                curr_r = rate_records[curr_d_obj]
+                prev_r = rate_records[prev_d_obj]
                 diff = round(curr_r - prev_r, 4)
-                
+
                 # 數值下降為新台幣升值(🟢)，上升為貶值(🔴)
                 if diff < -0.0001:
                     chg_str = f"(升{abs(diff):.3f}) 🟢"
@@ -227,8 +245,9 @@ def get_taifex_fx_rate_5days():
                     chg_str = f"(貶{abs(diff):.3f}) 🔴"
                 else:
                     chg_str = "(平盤) ⚪"
-                
-                fx_map[curr_d] = f"匯率:{curr_r:.3f} {chg_str}"
+
+                m_d = f"{curr_d_obj.month:02d}/{curr_d_obj.day:02d}"
+                fx_map[m_d] = f"匯率:{curr_r:.3f} {chg_str}"
     except Exception as e:
         print(f"匯率漲跌計算異常: {e}")
 
