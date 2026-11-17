@@ -537,7 +537,7 @@ def build_message():
 
     # --- 官股查詢直達連結 ---
     msg += "🏛️【八大官股即時動向查詢】\n"
-    msg += "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount\n\n"
+    msg += "https://reurl.cc/mzV88j"
 
     # --- 上市及上櫃融資維持率查詢連結 ---
     msg += "⚖️【上市及上櫃融資維持率】\n"
