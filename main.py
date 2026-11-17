@@ -536,7 +536,7 @@ def build_message():
     msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
 
     # --- 官股查詢直達連結 ---
-    msg += "🏛️【八大官股即時動向查詢】\n"
+    msg += "🏛️【八大官股即時動向】\n"
     msg += "https://reurl.cc/mzV88j"
 
     # --- 上市及上櫃融資維持率查詢連結 ---
