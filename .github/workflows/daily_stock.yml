@@ -27,14 +27,13 @@ jobs:
           sudo apt-get install -y fonts-noto-cjk
           pip install requests beautifulsoup4 matplotlib
 
-      - name: Run Stock Script
+      - name: Step 1 - Generate Chart & Text
         env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          python main.py
+          python main.py --prepare
 
-      - name: Commit & Push Chart Image
+      - name: Step 2 - Commit & Push Chart Image First
         run: |
           if [ -f "charts/daily_chart.png" ]; then
             git config --global user.name "github-actions[bot]"
@@ -43,3 +42,10 @@ jobs:
             git diff --staged --quiet || git commit -m "chore: update daily stock chart"
             git push
           fi
+
+      - name: Step 3 - Send LINE Broadcast (Image + Text)
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python main.py --send
