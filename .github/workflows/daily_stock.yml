@@ -2,9 +2,12 @@ name: Daily Stock Line Push
 
 on:
   schedule:
-    # 台灣時間週一至週五 17:40（對應 UTC 09:40）自動執行
-    - cron: '40 9 * * 1-5'
+    # 台灣時間週一至週五 17:55（對應 UTC 09:55）自動執行
+    - cron: '55 9 * * 1-5'
   workflow_dispatch: # 保留手動測試按鈕
+
+permissions:
+  contents: write # 允許自動將產出的圖表 Commit 回 Repo 作為圖床
 
 jobs:
   run-bot:
@@ -18,12 +21,25 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
+      - name: Install Fonts & Dependencies
         run: |
-          pip install requests beautifulsoup4
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+          pip install requests beautifulsoup4 matplotlib
 
       - name: Run Stock Script
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           python main.py
+
+      - name: Commit & Push Chart Image
+        run: |
+          if [ -f "charts/daily_chart.png" ]; then
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add charts/daily_chart.png
+            git diff --staged --quiet || git commit -m "chore: update daily stock chart"
+            git push
+          fi
