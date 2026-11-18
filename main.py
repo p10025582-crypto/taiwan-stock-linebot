@@ -1,6 +1,8 @@
 import os
 import re
 import sys
+import json
+import time
 import requests
 import datetime
 from bs4 import BeautifulSoup
@@ -12,6 +14,7 @@ import numpy as np
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
+CACHE_FILE = "charts/payload_cache.json"
 
 def is_trading_day():
     """
@@ -37,7 +40,7 @@ def is_trading_day():
     return False
 
 def send_line_broadcast(text, image_url=None):
-    """透過 LINE Broadcast API 發送文字（及可選之圖片）"""
+    """透過單次 LINE Broadcast API 呼叫同時發送圖片與文字（僅計為 1 次推播）"""
     if not LINE_ACCESS_TOKEN:
         print("未設定 LINE 金鑰 (LINE_CHANNEL_ACCESS_TOKEN)")
         return
@@ -154,7 +157,7 @@ def get_taifex_fx_rate_5days():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
     fx_map = {}
-    fx_raw_map = {} # m_d -> (rate, diff)
+    fx_raw_map = {}
     rate_records = {}
 
     # 第一通道：中央銀行官方每日收盤匯率網頁
@@ -352,12 +355,10 @@ def get_gov_bank_5days():
                             m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
                             if m_date:
                                 m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
-                                # 尋找合計金額欄位（通常為最後一欄或第2欄）
                                 for cell in reversed(tds[1:]):
                                     clean_val = cell.replace(",", "").replace("+", "").replace("億", "").strip()
                                     try:
                                         val_f = float(clean_val)
-                                        # 若單位為萬元或千元，轉為億元
                                         if abs(val_f) > 5000:
                                             val_f = round(val_f / 10000.0, 2)
                                         gov_map[m_d] = round(val_f, 2)
@@ -373,18 +374,15 @@ def get_gov_bank_5days():
     return gov_map
 
 def get_margin_balance_5days():
-    """
-    抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）
-    """
+    """抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
-    tse_margin = {} # m_d -> 億元
-    otc_margin = {} # m_d -> 億元
+    tse_margin = {}
+    otc_margin = {}
     days_order = []
 
     try:
-        # 1. 抓取上市融資餘額 (HiStock 大盤融資融券表)
         url_tse = "https://histock.tw/stock/three.aspx?m=mg"
         res_tse = requests.get(url_tse, headers=headers, timeout=12)
         if res_tse.status_code == 200:
@@ -397,7 +395,6 @@ def get_margin_balance_5days():
                             m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
                             if m_date:
                                 m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
-                                # 尋找融資餘額（億元）
                                 for cell in tds[1:4]:
                                     clean_v = cell.replace(",", "").replace("億", "").strip()
                                     try:
@@ -417,7 +414,6 @@ def get_margin_balance_5days():
         print(f"上市融資餘額抓取異常: {e}")
 
     try:
-        # 2. 抓取上櫃融資餘額
         url_otc = "https://histock.tw/stock/three.aspx?m=otcmg"
         res_otc = requests.get(url_otc, headers=headers, timeout=12)
         if res_otc.status_code == 200:
@@ -446,35 +442,28 @@ def get_margin_balance_5days():
     except Exception as e:
         print(f"上櫃融資餘額抓取異常: {e}")
 
-    # 確保為「前一日基準」的近 5 個交易日
     today_md = f"{datetime.date.today().month:02d}/{datetime.date.today().day:02d}"
     filtered_days = [d for d in days_order if d != today_md][:5]
     return filtered_days, tse_margin, otc_margin
 
 def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_map, futures_num_map, bias_num_map, gov_map, margin_days, tse_margin, otc_margin):
-    """
-    繪製 Dark Mode 專業看盤風格直式戰情圖表：
-    - 整體單欄由上往下排，第一層為左右並排（大盤成交量 / 三大法人動向）
-    - 其餘項目為橫向近 5 日柱狀圖
-    - 上市及上櫃融資餘額採雙色並列橫向柱狀圖（前一日基準）
-    """
+    """繪製 Dark Mode 專業看盤風格直式戰情圖表"""
     os.makedirs("charts", exist_ok=True)
     output_path = "charts/daily_chart.png"
 
     plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'Noto Sans CJK TC', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
-    # Dark Mode 專業看盤配色
-    BG_COLOR = "#0F172A"      # 深藍黑底
-    CARD_BG = "#1E293B"       # 卡片區塊底色
-    TEXT_MAIN = "#F8FAFC"     # 純白主字
-    TEXT_SUB = "#94A3B8"      # 淺灰副字
-    GRID_COLOR = "#334155"    # 網格線
-    RED_UP = "#EF4444"        # 買超 / 貶值 / 正乖離（亮紅）
-    GREEN_DOWN = "#10B981"    # 賣超 / 升值 / 負乖離（翠綠）
-    BLUE_BAR = "#38BDF8"      # 大盤量 / 上市融資（亮天藍）
-    AMBER_BAR = "#F59E0B"     # 上櫃融資 / 匯率（琥珀金）
-    PURPLE_BAR = "#A855F7"    # 外資空單（亮紫）
+    BG_COLOR = "#0F172A"
+    CARD_BG = "#1E293B"
+    TEXT_MAIN = "#F8FAFC"
+    TEXT_SUB = "#94A3B8"
+    GRID_COLOR = "#334155"
+    RED_UP = "#EF4444"
+    GREEN_DOWN = "#10B981"
+    BLUE_BAR = "#38BDF8"
+    AMBER_BAR = "#F59E0B"
+    PURPLE_BAR = "#A855F7"
 
     fig = plt.figure(figsize=(10, 21), dpi=130, facecolor=BG_COLOR)
     gs = gridspec.GridSpec(6, 2, figure=fig, height_ratios=[1.1, 1.0, 1.0, 1.0, 1.0, 1.25], hspace=0.45, wspace=0.28)
@@ -482,7 +471,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     today_str = datetime.date.today().strftime("%Y/%m/%d")
     fig.suptitle(f"台股盤後籌碼戰情總覽  |  {today_str}", fontsize=20, fontweight="bold", color=TEXT_MAIN, y=0.965)
 
-    days_rev = list(reversed(twse_days_list)) # 由舊到新由下往上排，最新日期在最上方
+    days_rev = list(reversed(twse_days_list))
 
     def style_ax(ax, title):
         ax.set_facecolor(CARD_BG)
@@ -494,7 +483,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
             spine.set_edgecolor(GRID_COLOR)
             spine.set_linewidth(0.8)
 
-    # --- 1. 左上：近5日大盤成交量 ---
+    # 1. 左上：近5日大盤成交量
     ax1 = fig.add_subplot(gs[0, 0])
     style_ax(ax1, "① 近5日大盤成交量 (億)")
     vals1 = [turnover_map.get(d, 0) for d in days_rev]
@@ -504,7 +493,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     for bar, v in zip(bars1, vals1):
         ax1.text(v + max_v1 * 0.02, bar.get_y() + bar.get_height()/2, f"{v:,.1f}", va="center", ha="left", color=TEXT_MAIN, fontsize=9.5, fontweight="bold")
 
-    # --- 2. 右上：近5日三大法人買賣超 ---
+    # 2. 右上：近5日三大法人買賣超
     ax2 = fig.add_subplot(gs[0, 1])
     style_ax(ax2, "② 近5日三大法人買賣超 (億)")
     vals2 = [inst_num_map.get(d, 0) for d in days_rev]
@@ -519,7 +508,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
         ha_align = "left" if v >= 0 else "right"
         ax2.text(v + offset, bar.get_y() + bar.get_height()/2, f"{v:+.1f}", va="center", ha=ha_align, color=TEXT_MAIN, fontsize=9.5, fontweight="bold")
 
-    # --- 3. 第二層：近5日新台幣/美元匯率 ---
+    # 3. 第二層：近5日新台幣/美元匯率
     ax3 = fig.add_subplot(gs[1, :])
     style_ax(ax3, "③ 近5日新台幣/美元匯率 (紅:貶值 / 綠:升值)")
     fx_rates = [fx_raw_map.get(d, (0, 0))[0] for d in days_rev]
@@ -535,7 +524,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
             tag = f"貶{abs(df):.3f}" if df > 0.0001 else (f"升{abs(df):.3f}" if df < -0.0001 else "平盤")
             ax3.text(r + (max_fx - min_fx)*0.015, bar.get_y() + bar.get_height()/2, f"{r:.3f} ({tag})", va="center", ha="left", color=TEXT_MAIN, fontsize=10.5, fontweight="bold")
 
-    # --- 4. 第三層：近5日台指期外資未平倉淨部位 ---
+    # 4. 第三層：近5日台指期外資未平倉淨空單
     ax4 = fig.add_subplot(gs[2, :])
     style_ax(ax4, "④ 近5日台指期外資未平倉淨空單 (口)")
     vals4 = [abs(futures_num_map.get(d, 0)) for d in days_rev]
@@ -547,7 +536,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
         label_f = f"空單 {abs(raw_f):,} 口" if raw_f <= 0 else f"多單 {raw_f:,} 口"
         ax4.text(abs(raw_f) + max_v4 * 0.015, bar.get_y() + bar.get_height()/2, label_f, va="center", ha="left", color=TEXT_MAIN, fontsize=10.5, fontweight="bold")
 
-    # --- 5. 第四層：近5日大盤5MA乖離率 ---
+    # 5. 第四層：近5日大盤5MA乖離率
     ax5 = fig.add_subplot(gs[3, :])
     style_ax(ax5, "⑤ 近5日大盤5MA乖離率 (%)")
     vals5 = [bias_num_map.get(d, 0) for d in days_rev]
@@ -562,7 +551,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
         ha_align = "left" if v >= 0 else "right"
         ax5.text(v + offset, bar.get_y() + bar.get_height()/2, f"{v:+.2f}%", va="center", ha=ha_align, color=TEXT_MAIN, fontsize=10.5, fontweight="bold")
 
-    # --- 6. 第五層：近5日八大官股買賣超動向 ---
+    # 6. 第五層：近5日八大官股買賣超動向
     ax6 = fig.add_subplot(gs[4, :])
     style_ax(ax6, "⑥ 近5日八大官股買賣超動向 (億)")
     vals6 = [gov_map.get(d, 0) for d in days_rev]
@@ -578,7 +567,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
         txt6 = f"{v:+.2f}億" if v != 0 else "結算中"
         ax6.text(v + offset, bar.get_y() + bar.get_height()/2, txt6, va="center", ha=ha_align, color=TEXT_MAIN, fontsize=10.5, fontweight="bold")
 
-    # --- 7. 第六層：近5日上市及上櫃融資餘額（雙色並列橫向柱狀圖） ---
+    # 7. 第六層：近5日上市及上櫃融資餘額（雙色並列橫向柱狀圖）
     ax7 = fig.add_subplot(gs[5, :])
     m_days_rev = list(reversed(margin_days)) if margin_days else days_rev
     style_ax(ax7, "⑦ 近5日上市及上櫃融資餘額 [前一日基準] (億)")
@@ -760,7 +749,8 @@ def get_otc_market_rankings():
 
     return buy_top10, sell_top10
 
-def run_pipeline():
+def prepare_data_and_chart():
+    """Step 1：抓取全市場數據、繪製戰情圖表，並將文字內容暫存至本地快取檔"""
     today_str = datetime.date.today().strftime("%Y/%m/%d")
     twse_map, twse_days_list, bias_map, bias_num_map = get_twse_market_data_and_bias()
     fx_map, fx_raw_map = get_taifex_fx_rate_5days()
@@ -770,7 +760,6 @@ def run_pipeline():
     tse_buy, tse_sell = get_tse_market_rankings()
     otc_buy, otc_sell = get_otc_market_rankings()
 
-    # 1. 產出 Dark Mode 橫向柱狀圖表
     image_url = None
     try:
         generate_dashboard_chart(
@@ -784,7 +773,6 @@ def run_pipeline():
     except Exception as e:
         print(f"圖表產出異常（不影響文字推播）: {e}")
 
-    # 2. 組合原有文字訊息（100% 維持原有結構與換行修正）
     msg = f"📊【台股盤後籌碼總覽】\n"
     msg += f"📅 日期：{today_str}\n\n"
 
@@ -835,15 +823,43 @@ def run_pipeline():
     msg += "⚖️【上市及上櫃融資維持率】\n"
     msg += "https://reurl.cc/Xxzm8D"
 
-    return msg, image_url
+    os.makedirs("charts", exist_ok=True)
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"text": msg, "image_url": image_url}, f, ensure_ascii=False)
+    print("數據與圖表準備完成，已寫入本地快取。")
+
+def send_cached_broadcast():
+    """Step 3：確認圖片已 Push 上 GitHub CDN 後，讀取快取並單次發送 LINE 圖文推播"""
+    if not os.path.exists(CACHE_FILE):
+        print("找不到推播快取檔（可能為休市日已略過），結束執行。")
+        return
+
+    with open(CACHE_FILE, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    # 緩衝 3 秒確保 GitHub raw CDN 同步更新完成
+    time.sleep(3)
+    send_line_broadcast(payload["text"], payload.get("image_url"))
 
 if __name__ == "__main__":
     try:
-        if not is_trading_day():
-            print("今日為休市日（國定假日或颱風假），取消推播。")
-            sys.exit(0)
+        mode = sys.argv[1] if len(sys.argv) > 1 else "--all"
 
-        content, img_url = run_pipeline()
-        send_line_broadcast(content, img_url)
+        if mode == "--prepare":
+            if not is_trading_day():
+                print("今日為休市日（國定假日或颱風假），取消推播。")
+                sys.exit(0)
+            prepare_data_and_chart()
+
+        elif mode == "--send":
+            send_cached_broadcast()
+
+        else:
+            if not is_trading_day():
+                print("今日為休市日（國定假日或颱風假），取消推播。")
+                sys.exit(0)
+            prepare_data_and_chart()
+            send_cached_broadcast()
+
     except Exception as e:
         print(f"主執行程序異常: {e}")
