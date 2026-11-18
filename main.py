@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch
+from matplotlib.patches import FancyBboxPatch, Circle
 import numpy as np
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
@@ -326,18 +326,60 @@ def get_histock_three_and_futures_5days():
     return inst_map, inst_num_map, futures_map, futures_num_map
 
 def get_gov_bank_5days():
-    """多通道抓取近 5 日八大官股買賣超金額（單位：億元）"""
+    """
+    以玩股網八大官股買賣超頁面 (https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount)
+    為來源，直接呼叫其背後的 JSON 數據端點並搭配備援解析，解決前端動態載入導致的「結算中」問題。
+    """
+    referer_url = "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": referer_url,
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01"
     }
     gov_map = {}
 
-    # 通道 1：玩股網八大官股買賣超金額總表
+    # 通道 1：玩股網八大官股買賣超金額 JSON API
+    wantgoo_apis = [
+        "https://www.wantgoo.com/stock/public-bank/trend-data?market=-1&typeShow=amount",
+        "https://www.wantgoo.com/stock/public-bank/get-trend-data?market=-1&typeShow=amount"
+    ]
+    for api_url in wantgoo_apis:
+        try:
+            res = requests.get(api_url, headers=headers, timeout=12)
+            if res.status_code == 200 and res.text.strip().startswith(("[", "{")):
+                data = res.json()
+                items = data if isinstance(data, list) else data.get("data", data.get("items", []))
+                for item in items:
+                    if isinstance(item, dict):
+                        d_raw = str(item.get("date", item.get("tradeDate", item.get("d", "")))).strip()
+                        val_raw = item.get("amount", item.get("netAmount", item.get("value", item.get("total", None))))
+                        m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', d_raw)
+                        if m_date and val_raw is not None:
+                            m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
+                            val_f = float(str(val_raw).replace(",", ""))
+                            # 若單位為元或仟元，自動換算為億元
+                            if abs(val_f) > 1000000:
+                                val_f = val_f / 100000000.0
+                            elif abs(val_f) > 5000:
+                                val_f = val_f / 10000.0
+                            gov_map[m_d] = round(val_f, 2)
+                if len(gov_map) >= 5:
+                    print(f"成功從玩股網 API 取得八大官股數據: {len(gov_map)} 筆")
+                    return gov_map
+        except Exception as e:
+            print(f"玩股網 API ({api_url}) 異常: {e}")
+
+    # 通道 2：解析玩股網頁面內嵌 JSON / 表格資料
     try:
-        url_wg = "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
-        res_wg = requests.get(url_wg, headers=headers, timeout=12)
-        if res_wg.status_code == 200:
-            soup = BeautifulSoup(res_wg.text, "html.parser")
+        session = requests.Session()
+        res_page = session.get(referer_url, headers={
+            "User-Agent": headers["User-Agent"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }, timeout=12)
+        if res_page.status_code == 200:
+            # 嘗試從頁面 script 變數中提取日期與金額陣列
+            soup = BeautifulSoup(res_page.text, "html.parser")
             for tr in soup.find_all("tr"):
                 tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
                 if len(tds) >= 2:
@@ -348,42 +390,42 @@ def get_gov_bank_5days():
                             clean_v = cell.replace(",", "").replace("+", "").replace("億", "").strip()
                             try:
                                 val_f = float(clean_v)
+                                if 12000 <= val_f <= 40000:
+                                    continue
                                 if abs(val_f) > 5000:
-                                    val_f = round(val_f / 10000.0, 2)
+                                    val_f = val_f / 10000.0
                                 gov_map[m_d] = round(val_f, 2)
                                 break
                             except ValueError:
                                 continue
-                if len(gov_map) >= 8:
-                    break
     except Exception as e:
-        print(f"八大官股通道 1 (玩股網) 異常: {e}")
+        print(f"玩股網網頁解析異常: {e}")
 
-    # 通道 2：HiStock 八大官股行庫進出表（備援）
+    # 通道 3：HiStock 八大官股行庫買賣超備援
     if len(gov_map) < 5:
         try:
             url_hs = "https://histock.tw/stock/public.aspx"
-            res_hs = requests.get(url_hs, headers=headers, timeout=12)
+            res_hs = requests.get(url_hs, headers={"User-Agent": headers["User-Agent"]}, timeout=12)
             if res_hs.status_code == 200:
                 soup = BeautifulSoup(res_hs.text, "html.parser")
                 for tbl in soup.find_all("table"):
                     for row in tbl.find_all("tr")[1:]:
                         tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                        if len(tds) >= 2:
+                        if len(tds) >= 3:
                             m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
                             if m_date:
                                 m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
                                 if m_d in gov_map:
                                     continue
+                                # HiStock 表格第 2 欄通常為八大行庫買賣超金額(億)，第 3 欄為加權指數
                                 for cell in tds[1:]:
                                     clean_v = cell.replace(",", "").replace("+", "").replace("億", "").strip()
                                     try:
                                         val_f = float(clean_v)
-                                        # 過濾掉加權指數（通常 > 10000）
                                         if 12000 <= val_f <= 40000:
                                             continue
                                         if abs(val_f) > 5000:
-                                            val_f = round(val_f / 10000.0, 2)
+                                            val_f = val_f / 10000.0
                                         gov_map[m_d] = round(val_f, 2)
                                         break
                                     except ValueError:
@@ -391,13 +433,15 @@ def get_gov_bank_5days():
                         if len(gov_map) >= 8:
                             break
         except Exception as e:
-            print(f"八大官股通道 2 (HiStock) 異常: {e}")
+            print(f"HiStock 八大官股備援異常: {e}")
 
     return gov_map
 
 def get_margin_balance_5days():
     """
-    多通道抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）
+    多通道抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）：
+    - 上市：HiStock / 證交所 MI_MARGN
+    - 上櫃：櫃買中心官方信用交易統計報表 (TPEx) 逐日抓取總餘額，確保橘色堆疊段完整呈現
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -406,7 +450,7 @@ def get_margin_balance_5days():
     otc_margin = {}
     days_order = []
 
-    # 1. 上市融資餘額 (HiStock)
+    # 1. 抓取上市融資餘額 (HiStock)
     try:
         url_tse = "https://histock.tw/stock/three.aspx?m=mg"
         res_tse = requests.get(url_tse, headers=headers, timeout=12)
@@ -438,65 +482,82 @@ def get_margin_balance_5days():
     except Exception as e:
         print(f"上市融資餘額抓取異常: {e}")
 
-    # 2. 上櫃融資餘額 (通道 1: HiStock / 通道 2: 櫃買中心官方信用交易統計)
-    try:
-        url_otc = "https://histock.tw/stock/three.aspx?m=otcmg"
-        res_otc = requests.get(url_otc, headers=headers, timeout=12)
-        if res_otc.status_code == 200:
-            soup = BeautifulSoup(res_otc.text, "html.parser")
-            for tbl in soup.find_all("table"):
-                if "融資餘額" in tbl.get_text():
+    today_md = f"{datetime.date.today().month:02d}/{datetime.date.today().day:02d}"
+    filtered_days = [d for d in days_order if d != today_md][:5]
+
+    # 2. 抓取上櫃融資餘額：直接向櫃買中心官方信用交易統計逐日查詢
+    today = datetime.date.today()
+    for delta in range(1, 12):
+        if len(otc_margin) >= 5:
+            break
+        target_d = today - datetime.timedelta(days=delta)
+        if target_d.weekday() >= 5:
+            continue
+        m_d = f"{target_d.month:02d}/{target_d.day:02d}"
+        roc_y = target_d.year - 1911
+        d_roc = f"{roc_y}/{target_d.month:02d}/{target_d.day:02d}"
+
+        try:
+            url_tpex = f"https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d={d_roc}"
+            res_tpex = requests.get(url_tpex, headers=headers, timeout=10)
+            if res_tpex.status_code == 200:
+                j_data = res_tpex.json()
+                # 櫃買中心融資餘額總表通常在 tfoot 或 tables[-1] 顯示合計（單位：仟元）
+                tables = j_data.get("tables", [])
+                for tbl in tables:
+                    tfoot = tbl.get("tfoot", [])
+                    for row in tfoot:
+                        row_txt = "".join([str(c) for c in row])
+                        if "合計" in row_txt or "總計" in row_txt:
+                            # 融資餘額（仟元）通常為最後幾欄中的大數值
+                            nums = []
+                            for c in row:
+                                c_clean = str(c).replace(",", "").strip()
+                                if c_clean.isdigit() and int(c_clean) > 10000000:
+                                    nums.append(int(c_clean))
+                            if nums:
+                                # 取最大的金額欄位（融資餘額仟元）換算為億元
+                                otc_billion = round(max(nums) / 100000.0, 1)
+                                if 300 <= otc_billion <= 5000:
+                                    otc_margin[m_d] = otc_billion
+                                    break
+                    if m_d in otc_margin:
+                        break
+        except Exception as e:
+            print(f"櫃買中心上櫃融資 ({d_roc}) 抓取異常: {e}")
+
+    # 若部分日期仍缺上櫃融資，從 HiStock 櫃買頁補齊
+    if len(otc_margin) < 5:
+        try:
+            url_otc = "https://histock.tw/stock/three.aspx?m=otcmg"
+            res_otc = requests.get(url_otc, headers=headers, timeout=12)
+            if res_otc.status_code == 200:
+                soup = BeautifulSoup(res_otc.text, "html.parser")
+                for tbl in soup.find_all("table"):
                     for row in tbl.find_all("tr")[1:]:
                         tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                        if len(tds) >= 4:
+                        if len(tds) >= 3:
                             m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
                             if m_date:
                                 m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
+                                if m_d in otc_margin:
+                                    continue
                                 for cell in tds[1:]:
                                     clean_v = cell.replace(",", "").replace("億", "").strip()
                                     try:
                                         v_f = float(clean_v)
-                                        # 放寬上櫃融資餘額區間 (300 ~ 5000 億)
                                         if 300 <= v_f <= 5000:
                                             otc_margin[m_d] = round(v_f, 1)
                                             break
                                     except ValueError:
                                         continue
-                        if len(otc_margin) >= 7:
-                            break
-                    if otc_margin:
-                        break
-    except Exception as e:
-        print(f"上櫃融資餘額通道 1 異常: {e}")
-
-    # 通道 2：櫃買中心官方 OpenAPI / 信用交易日報補齊上櫃融資餘額
-    if len(otc_margin) < 5:
-        try:
-            url_tpex_mg = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
-            res_tpex = requests.get(url_tpex_mg, headers=headers, timeout=12)
-            if res_tpex.status_code == 200:
-                data_list = res_tpex.json()
-                # 依日期加總當日所有上櫃個股融資餘額（仟元 -> 億元）
-                daily_sum = {}
-                for item in data_list:
-                    d_raw = str(item.get("Date", "")).strip()
-                    bal_raw = str(item.get("MarginPurchaseBalance", "0")).replace(",", "").strip()
-                    if len(d_raw) >= 6 and bal_raw.isdigit():
-                        m_d = f"{int(d_raw[-4:-2]):02d}/{int(d_raw[-2:]):02d}"
-                        daily_sum[m_d] = daily_sum.get(m_d, 0) + float(bal_raw)
-                for m_d, total_k in daily_sum.items():
-                    if m_d not in otc_margin and total_k > 0:
-                        otc_margin[m_d] = round(total_k / 100000.0, 1)
         except Exception as e:
-            print(f"上櫃融資餘額通道 2 (TPEx) 異常: {e}")
+            print(f"HiStock 上櫃融資備援異常: {e}")
 
-    today_md = f"{datetime.date.today().month:02d}/{datetime.date.today().day:02d}"
-    filtered_days = [d for d in days_order if d != today_md][:5]
     return filtered_days, tse_margin, otc_margin
 
 def draw_card_box(fig, x, y, w, h, title, bg_color="#FFFFFF", header_color="#007A99"):
-    """繪製冰藍資訊圖卡風格的圓角白色卡片與深藍綠標題橫幅"""
-    # 卡片主體陰影與白底
+    """繪製冰藍資訊圖卡風格的圓角白色卡片與深藍綠標題橫幅（無 Emoji，改用幾何裝飾圓點）"""
     card = FancyBboxPatch(
         (x, y), w, h,
         boxstyle="round,pad=0,rounding_size=0.015",
@@ -505,7 +566,6 @@ def draw_card_box(fig, x, y, w, h, title, bg_color="#FFFFFF", header_color="#007
     )
     fig.patches.append(card)
 
-    # 頂部深藍綠標題列
     header_h = 0.036
     header = FancyBboxPatch(
         (x, y + h - header_h), w, header_h,
@@ -515,17 +575,25 @@ def draw_card_box(fig, x, y, w, h, title, bg_color="#FFFFFF", header_color="#007
     )
     fig.patches.append(header)
 
-    # 標題文字
+    # 標題左側白色幾何裝飾圓點（取代在 Linux 環境會變方框的 Emoji）
+    dot = Circle(
+        (x + 0.018, y + h - header_h / 2), radius=0.0045,
+        facecolor="#7DD3FC", edgecolor="none",
+        transform=fig.transFigure, zorder=3
+    )
+    fig.patches.append(dot)
+
     fig.text(
-        x + 0.018, y + h - header_h / 2, title,
+        x + 0.030, y + h - header_h / 2, title,
         fontsize=12.5, fontweight="bold", color="#FFFFFF",
         va="center", ha="left", zorder=3
     )
 
 def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_map, futures_num_map, bias_num_map, gov_map, margin_days, tse_margin, otc_margin):
     """
-    繪製清亮冰藍資訊圖卡風格（緊湊比例 10 x 13.8，一屏看盡全貌）：
+    繪製清亮冰藍資訊圖卡風格（緊湊比例 10 x 13.8）：
     - 3 層雙欄（6 個指標卡片）＋ 底部 1 層全寬堆疊橫條圖（上市＋上櫃融資餘額）
+    - 全面移除 Emoji 避免方框亂碼
     """
     os.makedirs("charts", exist_ok=True)
     output_path = "charts/daily_chart.png"
@@ -533,23 +601,29 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'Noto Sans CJK TC', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
-    # 冰藍清爽配色系統
-    BG_ICE = "#E6F4FA"        # 淺冰藍底色
-    TEXT_DARK = "#0F2942"     # 深海藍主文字
-    TEXT_MUTED = "#475569"    # 灰藍副文字
-    GRID_LIGHT = "#E2E8F0"    # 淡灰網格線
-    RED_BAR = "#E11D48"       # 買超 / 貶值 / 正乖離（亮紅）
-    GREEN_BAR = "#059669"     # 賣超 / 升值 / 負乖離（翠綠）
-    BLUE_MAIN = "#0284C7"     # 大盤量 / 上市融資（亮天藍）
-    AMBER_OTC = "#F59E0B"     # 上櫃融資堆疊段（琥珀金）
-    PURPLE_FUT = "#7C3AED"    # 外資空單（深紫）
-    HEADER_TEAL = "#007A99"   # 卡片標題深藍綠
+    BG_ICE = "#E6F4FA"
+    TEXT_DARK = "#0F2942"
+    TEXT_MUTED = "#475569"
+    GRID_LIGHT = "#E2E8F0"
+    RED_BAR = "#E11D48"
+    GREEN_BAR = "#059669"
+    BLUE_MAIN = "#0284C7"
+    AMBER_OTC = "#F59E0B"
+    PURPLE_FUT = "#7C3AED"
+    HEADER_TEAL = "#007A99"
 
     fig = plt.figure(figsize=(10, 13.8), dpi=130, facecolor=BG_ICE)
 
-    # 頂部主標題與膠囊日期標籤
+    # 頂部主標題（左側深藍綠幾何色塊裝飾＋純文字標題，右側日期膠囊）
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    fig.text(0.05, 0.955, "📊 台股盤後籌碼戰情總覽", fontsize=23, fontweight="bold", color=TEXT_DARK, va="center", ha="left")
+    title_badge = FancyBboxPatch(
+        (0.04, 0.941), 0.012, 0.028,
+        boxstyle="round,pad=0,rounding_size=0.004",
+        facecolor=HEADER_TEAL, edgecolor="none",
+        transform=fig.transFigure, zorder=2
+    )
+    fig.patches.append(title_badge)
+    fig.text(0.062, 0.955, "台股盤後籌碼戰情總覽", fontsize=23, fontweight="bold", color=TEXT_DARK, va="center", ha="left")
     
     date_pill = FancyBboxPatch(
         (0.74, 0.936), 0.22, 0.038,
@@ -560,8 +634,6 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     fig.patches.append(date_pill)
     fig.text(0.85, 0.955, today_str, fontsize=15, fontweight="bold", color="#FFFFFF", va="center", ha="center", zorder=3)
 
-    # 卡片座標幾何定義 (x, y, w, h)
-    # 3 層雙欄 + 1 層全寬
     col_w = 0.445
     left_x = 0.04
     right_x = 0.515
@@ -573,13 +645,13 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     row4_h = 0.186
 
     cards_meta = [
-        (left_x,  y_row1, col_w, row_h, "↗ 近5日大盤成交量 (億)"),
-        (right_x, y_row1, col_w, row_h, "👥 近5日三大法人買賣超 (億)"),
-        (left_x,  y_row2, col_w, row_h, "💱 近5日新台幣/美元匯率 (紅:貶 / 綠:升)"),
-        (right_x, y_row2, col_w, row_h, "🎯 近5日台指期外資未平倉淨空單 (口)"),
-        (left_x,  y_row3, col_w, row_h, "📐 近5日大盤5MA乖離率 (%)"),
-        (right_x, y_row3, col_w, row_h, "🏛️ 近5日八大官股買賣超動向 (億)"),
-        (left_x,  y_row4, 0.92,  row4_h, "⚖️ 近5日上市及上櫃融資餘額 [前一日基準 · 堆疊總覽] (億)")
+        (left_x,  y_row1, col_w, row_h, "1. 近5日大盤成交量 (億)"),
+        (right_x, y_row1, col_w, row_h, "2. 近5日三大法人買賣超 (億)"),
+        (left_x,  y_row2, col_w, row_h, "3. 近5日新台幣/美元匯率 (紅:貶 / 綠:升)"),
+        (right_x, y_row2, col_w, row_h, "4. 近5日台指期外資未平倉淨空單 (口)"),
+        (left_x,  y_row3, col_w, row_h, "5. 近5日大盤5MA乖離率 (%)"),
+        (right_x, y_row3, col_w, row_h, "6. 近5日八大官股買賣超動向 (億)"),
+        (left_x,  y_row4, 0.92,  row4_h, "7. 近5日上市及上櫃融資餘額 [前一日基準 · 堆疊總覽] (億)")
     ]
 
     for cx, cy, cw, ch, ctitle in cards_meta:
@@ -673,11 +745,11 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     ax6.axvline(0, color="#64748B", linewidth=1)
     max_abs6 = max([abs(v) for v in vals6]) if vals6 else 100
     max_abs6 = max(max_abs6, 20)
-    ax6.set_xlim(-max_abs6 * 1.52, max_abs6 * 1.52)
+    ax6.set_xlim(-max_abs6 * 1.55, max_abs6 * 1.55)
     for bar, v in zip(bars6, vals6):
         offset = max_abs6 * 0.04 if v >= 0 else -max_abs6 * 0.04
         ha_align = "left" if v >= 0 else "right"
-        txt6 = f"{v:+.1f}億" if v != 0 else "結算中"
+        txt6 = f"{v:+.2f}億" if v != 0 else "結算中"
         ax6.text(v + offset, bar.get_y() + bar.get_height()/2, txt6, va="center", ha=ha_align, color=TEXT_DARK, fontsize=10, fontweight="bold")
 
     # --- 7. 第四層全寬：近5日上市及上櫃融資餘額（平面堆疊橫條圖） ---
@@ -687,13 +759,12 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     otc_vals = np.array([otc_margin.get(d, 0) for d in m_days_rev], dtype=float)
     totals = tse_vals + otc_vals
 
-    bars_tse = ax7.barh(m_days_rev, tse_vals, color=BLUE_MAIN, height=0.58, label="上市融資餘額")
-    bars_otc = ax7.barh(m_days_rev, otc_vals, left=tse_vals, color=AMBER_OTC, height=0.58, label="上櫃融資餘額")
+    ax7.barh(m_days_rev, tse_vals, color=BLUE_MAIN, height=0.58, label="上市融資餘額")
+    ax7.barh(m_days_rev, otc_vals, left=tse_vals, color=AMBER_OTC, height=0.58, label="上櫃融資餘額")
 
-    max_total = max(totals) if len(totals) > 0 and max(totals) > 0 else 6500
+    max_total = max(totals) if len(totals) > 0 and max(totals) > 0 else 6800
     ax7.set_xlim(0, max_total * 1.24)
 
-    # 圖例放置於卡片標題列右側（不遮擋任何柱狀圖）
     ax7.legend(
         loc="upper right", bbox_to_anchor=(1.0, 1.25), ncol=2,
         frameon=True, facecolor="#FFFFFF", edgecolor="#CBD5E1",
@@ -704,16 +775,14 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
         if t_v > 0:
             ax7.text(t_v / 2, i, f"上市 {t_v:,.1f}", va="center", ha="center", color="#FFFFFF", fontsize=9.5, fontweight="bold")
         if o_v > 0:
-            # 若上櫃段夠寬則置中白字，否則緊貼右側顯示
             if o_v > max_total * 0.11:
                 ax7.text(t_v + o_v / 2, i, f"上櫃 {o_v:,.1f}", va="center", ha="center", color="#FFFFFF", fontsize=9.5, fontweight="bold")
+                ax7.text(tot_v + max_total * 0.012, i, f"合計 {tot_v:,.1f}", va="center", ha="left", color=TEXT_DARK, fontsize=9.5, fontweight="bold")
             else:
                 ax7.text(tot_v + max_total * 0.012, i, f"上櫃 {o_v:,.1f} (合計 {tot_v:,.1f})", va="center", ha="left", color=TEXT_DARK, fontsize=9.5, fontweight="bold")
-                continue
-        if tot_v > 0:
+        elif tot_v > 0:
             ax7.text(tot_v + max_total * 0.012, i, f"合計 {tot_v:,.1f}", va="center", ha="left", color=TEXT_DARK, fontsize=9.5, fontweight="bold")
 
-    # 底部收尾標語
     fig.text(0.5, 0.022, "───────   掌握市場動態 · 從容應對變化   ───────", fontsize=12, fontweight="bold", color=HEADER_TEAL, va="center", ha="center")
 
     plt.savefig(output_path, facecolor=BG_ICE)
