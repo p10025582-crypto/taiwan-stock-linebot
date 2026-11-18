@@ -818,7 +818,7 @@ def prepare_data_and_chart():
     msg += ("\n".join(otc_sell) if otc_sell else "資料未取得或結算中") + "\n\n"
 
     msg += "🏛️【八大官股即時動向】\n"
-    msg += "https://reurl.cc/mkV8Bl\n\n"
+    msg += "https://pse.is/9vymbz\n\n"
 
     msg += "⚖️【上市及上櫃融資維持率】\n"
     msg += "https://reurl.cc/Xxzm8D"
