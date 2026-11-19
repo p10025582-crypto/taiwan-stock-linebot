@@ -1,51 +1,46 @@
-name: Daily Stock Line Push
+name: Daily Taiwan Stock Report
 
 on:
   schedule:
-    # 台灣時間週一至週五 17:55（對應 UTC 09:55）自動執行
+    # 每日台灣時間 17:55 執行 (UTC 09:55)
     - cron: '55 9 * * 1-5'
-  workflow_dispatch: # 保留手動測試按鈕
+  workflow_dispatch:
 
 permissions:
-  contents: write # 允許自動將產出的圖表 Commit 回 Repo 作為圖床
+  contents: write
 
 jobs:
-  run-bot:
+  build-and-broadcast:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Install Fonts & Dependencies
+      - name: Install dependencies and CJK fonts
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-noto-cjk
-          pip install requests beautifulsoup4 matplotlib
+          pip install requests beautifulsoup4 matplotlib numpy
 
-      - name: Step 1 - Generate Chart & Text
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          python main.py --prepare
-
-      - name: Step 2 - Commit & Push Chart Image First
-        run: |
-          if [ -f "charts/daily_chart.png" ]; then
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git add charts/daily_chart.png
-            git diff --staged --quiet || git commit -m "chore: update daily stock chart"
-            git push
-          fi
-
-      - name: Step 3 - Send LINE Broadcast (Image + Text)
+      - name: Step 1 - Prepare market data and chart
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python main.py --prepare
+
+      - name: Step 2 - Commit and push chart & margin history
         run: |
-          python main.py --send
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add charts/
+          git diff --staged --quiet || git commit -m "chore: update daily stock chart and margin history"
+          git push
+
+      - name: Step 3 - Send LINE broadcast
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        run: python main.py --send
