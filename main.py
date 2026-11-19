@@ -327,58 +327,58 @@ def get_histock_three_and_futures_5days():
 
 def get_gov_bank_5days():
     """
-    多通道抓取近 5 日八大官股買賣超金額（單位：億元）：
-    1. 玩股網八大官股買賣超頁面 (https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount)
-    2. HiStock 八大行庫近10日買賣超總表 (https://histock.tw/stock/three.aspx?m=b8)
+    抓取近 5 日八大官股買賣超金額（單位：億元）：
+    1. 主力通道：玩股網 https://www.wantgoo.com/stock/public-bank/trend
+       直接解析靜態總表：第一欄為交易日期，最後一欄為「合計(萬)」，除以 10000 換算為億元。
+    2. 備援通道：HiStock https://histock.tw/stock/three.aspx?m=b8
     """
-    referer_url = "https://www.wantgoo.com/stock/public-bank/trend?market=-1&typeShow=amount"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": referer_url,
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept": "application/json, text/javascript, */*; q=0.01"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"
     }
     gov_map = {}
 
-    # 通道 1：玩股網八大官股買賣超金額 JSON API
-    wantgoo_apis = [
-        "https://www.wantgoo.com/stock/public-bank/trend-data?market=-1&typeShow=amount",
-        "https://www.wantgoo.com/stock/public-bank/get-trend-data?market=-1&typeShow=amount"
-    ]
-    for api_url in wantgoo_apis:
-        try:
-            res = requests.get(api_url, headers=headers, timeout=12)
-            if res.status_code == 200 and res.text.strip().startswith(("[", "{")):
-                data = res.json()
-                items = data if isinstance(data, list) else data.get("data", data.get("items", []))
-                for item in items:
-                    if isinstance(item, dict):
-                        d_raw = str(item.get("date", item.get("tradeDate", item.get("d", "")))).strip()
-                        val_raw = item.get("amount", item.get("netAmount", item.get("value", item.get("total", None))))
-                        m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', d_raw)
-                        if m_date and val_raw is not None:
-                            m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
-                            val_f = float(str(val_raw).replace(",", ""))
-                            if abs(val_f) > 1000000:
-                                val_f = val_f / 100000000.0
-                            elif abs(val_f) > 5000:
-                                val_f = val_f / 10000.0
-                            gov_map[m_d] = round(val_f, 2)
+    # 通道 1：玩股網八大官股買賣超總表 (https://www.wantgoo.com/stock/public-bank/trend)
+    try:
+        url_wg = "https://www.wantgoo.com/stock/public-bank/trend"
+        res_wg = requests.get(url_wg, headers=headers, timeout=15)
+        if res_wg.status_code == 200:
+            soup = BeautifulSoup(res_wg.text, "html.parser")
+            for tbl in soup.find_all("table"):
+                header_txt = tbl.get_text()
+                if "合計" in header_txt or "日期" in header_txt:
+                    for row in tbl.find_all("tr")[1:]:
+                        tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                        if len(tds) >= 2:
+                            m_date = re.search(r'(?:\d{2,4}[/-])?(\d{1,2})[/-](\d{1,2})', tds[0])
+                            if m_date:
+                                m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
+                                # 玩股網該表格最後一欄為「合計(萬)」
+                                last_cell = tds[-1].replace(",", "").replace("+", "").replace("萬", "").strip()
+                                try:
+                                    val_wan = float(last_cell)
+                                    # 萬元換算為億元（除以 10000）
+                                    val_billion = round(val_wan / 10000.0, 2)
+                                    gov_map[m_d] = val_billion
+                                except ValueError:
+                                    continue
+                        if len(gov_map) >= 10:
+                            break
                 if len(gov_map) >= 5:
-                    print(f"成功從玩股網 API 取得八大官股數據: {len(gov_map)} 筆")
+                    print(f"成功從玩股網取得八大官股數據: {len(gov_map)} 筆 -> {list(gov_map.items())[:5]}")
                     return gov_map
-        except Exception as e:
-            print(f"玩股網 API ({api_url}) 異常: {e}")
+    except Exception as e:
+        print(f"玩股網八大官股抓取異常: {e}")
 
     # 通道 2：HiStock 八大行庫近10日買賣超總表 (https://histock.tw/stock/three.aspx?m=b8)
-    try:
-        url_b8 = "https://histock.tw/stock/three.aspx?m=b8"
-        res_b8 = requests.get(url_b8, headers={"User-Agent": headers["User-Agent"]}, timeout=12)
-        if res_b8.status_code == 200:
-            soup = BeautifulSoup(res_b8.text, "html.parser")
-            for tbl in soup.find_all("table"):
-                tbl_txt = tbl.get_text()
-                if "八大" in tbl_txt or "買賣超" in tbl_txt or "行庫" in tbl_txt:
+    if len(gov_map) < 5:
+        try:
+            url_b8 = "https://histock.tw/stock/three.aspx?m=b8"
+            res_b8 = requests.get(url_b8, headers=headers, timeout=12)
+            if res_b8.status_code == 200:
+                soup = BeautifulSoup(res_b8.text, "html.parser")
+                for tbl in soup.find_all("table"):
                     for row in tbl.find_all("tr")[1:]:
                         tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
                         if len(tds) >= 2:
@@ -391,7 +391,6 @@ def get_gov_bank_5days():
                                     clean_v = cell.replace(",", "").replace("+", "").replace("億", "").strip()
                                     try:
                                         val_f = float(clean_v)
-                                        # 過濾掉加權指數（通常在 12000 ~ 40000 之間）
                                         if 12000 <= val_f <= 40000:
                                             continue
                                         if abs(val_f) > 5000:
@@ -403,126 +402,201 @@ def get_gov_bank_5days():
                         if len(gov_map) >= 10:
                             break
                 if len(gov_map) >= 5:
-                    print(f"成功從 HiStock (m=b8) 取得八大官股數據: {len(gov_map)} 筆")
-                    return gov_map
-    except Exception as e:
-        print(f"HiStock (m=b8) 八大官股異常: {e}")
+                    print(f"成功從 HiStock 備援取得八大官股數據: {len(gov_map)} 筆")
+        except Exception as e:
+            print(f"HiStock 八大官股備援異常: {e}")
 
     return gov_map
 
+def _parse_wantgoo_margin_page(url, headers, min_val, max_val):
+    """輔助函式：從玩股網融資融券頁面與其數據端點解析近 7 日融資餘額（億元）"""
+    margin_dict = {}
+    days_list = []
+    session = requests.Session()
+    req_headers = dict(headers)
+    req_headers["Referer"] = url
+
+    # 1. 嘗試玩股網頁面靜態表格解析
+    try:
+        res = session.get(url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for tbl in soup.find_all("table"):
+                if "融資" in tbl.get_text():
+                    for row in tbl.find_all("tr")[1:]:
+                        tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                        if len(tds) >= 2:
+                            m_date = re.search(r'(?:\d{2,4}[/-])?(\d{1,2})[/-](\d{1,2})', tds[0])
+                            if m_date:
+                                m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
+                                for cell in tds[1:5]:
+                                    clean_v = cell.replace(",", "").replace("億", "").strip()
+                                    try:
+                                        v_f = float(clean_v)
+                                        # 若為仟元或萬元自動換算億元
+                                        if v_f > 10000000:
+                                            v_f = v_f / 100000000.0
+                                        elif v_f > 50000:
+                                            v_f = v_f / 10000.0
+                                        if min_val <= v_f <= max_val:
+                                            margin_dict[m_d] = round(v_f, 1)
+                                            if m_d not in days_list:
+                                                days_list.append(m_d)
+                                            break
+                                    except ValueError:
+                                        continue
+                        if len(days_list) >= 7:
+                            break
+                if len(margin_dict) >= 5:
+                    return days_list, margin_dict
+    except Exception as e:
+        print(f"玩股網融資頁面 ({url}) 解析異常: {e}")
+
+    # 2. 嘗試玩股網對應 XHR 數據端點
+    market_key = "taiex" if "taiex" in url else "otc"
+    api_candidates = [
+        f"https://www.wantgoo.com/stock/margin-trading/market-price-data/{market_key}",
+        f"https://www.wantgoo.com/stock/margin-trading/get-market-price/{market_key}"
+    ]
+    xhr_headers = dict(req_headers)
+    xhr_headers["X-Requested-With"] = "XMLHttpRequest"
+    for api_u in api_candidates:
+        try:
+            r_api = session.get(api_u, headers=xhr_headers, timeout=12)
+            if r_api.status_code == 200 and r_api.text.strip().startswith(("[", "{")):
+                j = r_api.json()
+                rows = j if isinstance(j, list) else j.get("data", j.get("items", []))
+                for item in rows:
+                    if isinstance(item, dict):
+                        d_raw = str(item.get("date", item.get("tradeDate", item.get("d", "")))).strip()
+                        bal = item.get("marginBalance", item.get("balance", item.get("margin", None)))
+                        m_date = re.search(r'(?:\d{2,4}[/-])?(\d{1,2})[/-](\d{1,2})', d_raw)
+                        if m_date and bal is not None:
+                            m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
+                            v_f = float(str(bal).replace(",", ""))
+                            if v_f > 10000000:
+                                v_f = v_f / 100000000.0
+                            elif v_f > 50000:
+                                v_f = v_f / 10000.0
+                            if min_val <= v_f <= max_val:
+                                margin_dict[m_d] = round(v_f, 1)
+                                if m_d not in days_list:
+                                    days_list.append(m_d)
+                if len(margin_dict) >= 5:
+                    return days_list, margin_dict
+        except Exception:
+            continue
+
+    return days_list, margin_dict
+
 def get_margin_balance_5days():
     """
-    精準鎖定抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）：
-    - 上市：HiStock (m=mg) 第 2 欄 (index 1) 融資餘額(億)
-    - 上櫃：HiStock (m=otcmg) 第 2 欄 (index 1) 融資餘額(億) + 櫃買中心官方報表雙重備援
+    多通道抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）：
+    1. 主力通道：玩股網上市 (taiex) 與上櫃 (otc) 融資餘額頁面
+    2. 備援通道：HiStock (m=mg / m=otcmg) 與 櫃買中心官方 OpenAPI (tpex_mainboard_margin_balance)
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
-    tse_margin = {}
-    otc_margin = {}
-    days_order = []
 
-    # 1. 上市融資餘額 (HiStock m=mg，明確鎖定 index 1 為融資餘額)
-    try:
-        url_tse = "https://histock.tw/stock/three.aspx?m=mg"
-        res_tse = requests.get(url_tse, headers=headers, timeout=12)
-        if res_tse.status_code == 200:
-            soup = BeautifulSoup(res_tse.text, "html.parser")
-            for tbl in soup.find_all("table"):
-                if "融資餘額" in tbl.get_text():
-                    for row in tbl.find_all("tr")[1:]:
-                        tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                        if len(tds) >= 2:
-                            m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
-                            if m_date:
-                                m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
-                                clean_v = tds[1].replace(",", "").replace("億", "").strip()
-                                try:
-                                    v_f = float(clean_v)
-                                    if 1000 <= v_f <= 9500:
-                                        tse_margin[m_d] = round(v_f, 1)
-                                        if m_d not in days_order:
-                                            days_order.append(m_d)
-                                except ValueError:
-                                    pass
-                        if len(days_order) >= 7:
+    # 通道 1：玩股網上市 & 上櫃融資餘額
+    days_order, tse_margin = _parse_wantgoo_margin_page(
+        "https://www.wantgoo.com/stock/margin-trading/market-price/taiex", headers, 1500, 9500
+    )
+    otc_days, otc_margin = _parse_wantgoo_margin_page(
+        "https://www.wantgoo.com/stock/margin-trading/market-price/otc", headers, 300, 5000
+    )
+
+    if not days_order and otc_days:
+        days_order = otc_days
+
+    # 通道 2：HiStock 備援補齊上市融資
+    if len(tse_margin) < 5:
+        try:
+            url_tse = "https://histock.tw/stock/three.aspx?m=mg"
+            res_tse = requests.get(url_tse, headers=headers, timeout=12)
+            if res_tse.status_code == 200:
+                soup = BeautifulSoup(res_tse.text, "html.parser")
+                for tbl in soup.find_all("table"):
+                    if "融資餘額" in tbl.get_text():
+                        for row in tbl.find_all("tr")[1:]:
+                            tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                            if len(tds) >= 2:
+                                m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
+                                if m_date:
+                                    m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
+                                    clean_v = tds[1].replace(",", "").replace("億", "").strip()
+                                    try:
+                                        v_f = float(clean_v)
+                                        if 1500 <= v_f <= 9500:
+                                            tse_margin[m_d] = round(v_f, 1)
+                                            if m_d not in days_order:
+                                                days_order.append(m_d)
+                                    except ValueError:
+                                        pass
+                            if len(days_order) >= 7:
+                                break
+                        if tse_margin:
                             break
-                    if tse_margin:
-                        break
-    except Exception as e:
-        print(f"上市融資餘額抓取異常: {e}")
+        except Exception as e:
+            print(f"HiStock 上市融資備援異常: {e}")
+
+    # 通道 2：HiStock 備援補齊上櫃融資
+    if len(otc_margin) < 5:
+        try:
+            url_otc = "https://histock.tw/stock/three.aspx?m=otcmg"
+            res_otc = requests.get(url_otc, headers=headers, timeout=12)
+            if res_otc.status_code == 200:
+                soup = BeautifulSoup(res_otc.text, "html.parser")
+                for tbl in soup.find_all("table"):
+                    if "融資餘額" in tbl.get_text():
+                        for row in tbl.find_all("tr")[1:]:
+                            tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                            if len(tds) >= 2:
+                                m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
+                                if m_date:
+                                    m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
+                                    if m_d in otc_margin:
+                                        continue
+                                    clean_v = tds[1].replace(",", "").replace("億", "").strip()
+                                    try:
+                                        v_f = float(clean_v)
+                                        if 300 <= v_f <= 5000:
+                                            otc_margin[m_d] = round(v_f, 1)
+                                    except ValueError:
+                                        pass
+                            if len(otc_margin) >= 7:
+                                break
+                        if otc_margin:
+                            break
+        except Exception as e:
+            print(f"HiStock 上櫃融資備援異常: {e}")
+
+    # 通道 3：櫃買中心官方 OpenAPI（當日最新上櫃全市場融資餘額加總補齊）
+    if len(otc_margin) < 5:
+        try:
+            url_openapi = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
+            res_api = requests.get(url_openapi, headers=headers, timeout=12)
+            if res_api.status_code == 200:
+                items = res_api.json()
+                sum_by_date = {}
+                for it in items:
+                    d_str = str(it.get("Date", "")).strip()
+                    bal_str = str(it.get("MarginPurchaseBalance", "0")).replace(",", "").strip()
+                    if len(d_str) >= 6 and bal_str.isdigit():
+                        m_d = f"{int(d_str[-4:-2]):02d}/{int(d_str[-2:]):02d}"
+                        sum_by_date[m_d] = sum_by_date.get(m_d, 0) + float(bal_str)
+                for m_d, tot_k in sum_by_date.items():
+                    if m_d not in otc_margin and tot_k > 0:
+                        otc_billion = round(tot_k / 100000.0, 1)
+                        if 300 <= otc_billion <= 5000:
+                            otc_margin[m_d] = otc_billion
+        except Exception as e:
+            print(f"櫃買中心 OpenAPI 上櫃融資備援異常: {e}")
 
     today_md = f"{datetime.date.today().month:02d}/{datetime.date.today().day:02d}"
     filtered_days = [d for d in days_order if d != today_md][:5]
-
-    # 2. 上櫃融資餘額通道 1：HiStock (m=otcmg，明確鎖定 index 1 為融資餘額)
-    try:
-        url_otc = "https://histock.tw/stock/three.aspx?m=otcmg"
-        res_otc = requests.get(url_otc, headers=headers, timeout=12)
-        if res_otc.status_code == 200:
-            soup = BeautifulSoup(res_otc.text, "html.parser")
-            for tbl in soup.find_all("table"):
-                if "融資餘額" in tbl.get_text():
-                    for row in tbl.find_all("tr")[1:]:
-                        tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                        if len(tds) >= 2:
-                            m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
-                            if m_date:
-                                m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
-                                clean_v = tds[1].replace(",", "").replace("億", "").strip()
-                                try:
-                                    v_f = float(clean_v)
-                                    if 300 <= v_f <= 5000:
-                                        otc_margin[m_d] = round(v_f, 1)
-                                except ValueError:
-                                    pass
-                        if len(otc_margin) >= 7:
-                            break
-                    if otc_margin:
-                        print(f"成功從 HiStock (m=otcmg) 取得上櫃融資餘額: {len(otc_margin)} 筆")
-                        break
-    except Exception as e:
-        print(f"上櫃融資餘額通道 1 (HiStock) 異常: {e}")
-
-    # 3. 上櫃融資餘額通道 2：櫃買中心官方信用交易統計報表逐日補齊
-    if any(d not in otc_margin for d in filtered_days):
-        today = datetime.date.today()
-        for delta in range(1, 12):
-            if all(d in otc_margin for d in filtered_days):
-                break
-            target_d = today - datetime.timedelta(days=delta)
-            if target_d.weekday() >= 5:
-                continue
-            m_d = f"{target_d.month:02d}/{target_d.day:02d}"
-            if m_d in otc_margin:
-                continue
-            roc_y = target_d.year - 1911
-            d_roc = f"{roc_y}/{target_d.month:02d}/{target_d.day:02d}"
-
-            try:
-                url_tpex = f"https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d={d_roc}"
-                res_tpex = requests.get(url_tpex, headers=headers, timeout=10)
-                if res_tpex.status_code == 200:
-                    j_data = res_tpex.json()
-                    tables = j_data.get("tables", [])
-                    for tbl in tables:
-                        for row in tbl.get("tfoot", []) + tbl.get("data", [])[-3:]:
-                            nums = []
-                            for c in row:
-                                c_clean = str(c).replace(",", "").strip()
-                                if c_clean.isdigit() and int(c_clean) > 10000000:
-                                    nums.append(int(c_clean))
-                            if nums:
-                                otc_billion = round(max(nums) / 100000.0, 1)
-                                if 300 <= otc_billion <= 5000:
-                                    otc_margin[m_d] = otc_billion
-                                    break
-                        if m_d in otc_margin:
-                            break
-            except Exception as e:
-                print(f"櫃買中心上櫃融資 ({d_roc}) 備援異常: {e}")
-
+    print(f"融資餘額結果 -> 日期:{filtered_days}, 上市:{tse_margin}, 上櫃:{otc_margin}")
     return filtered_days, tse_margin, otc_margin
 
 def draw_card_box(fig, x, y, w, h, title, bg_color="#FFFFFF", header_color="#007A99"):
