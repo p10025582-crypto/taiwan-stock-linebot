@@ -326,12 +326,112 @@ def get_histock_three_and_futures_5days():
         print(f"HiStock 現貨/期貨抓取異常: {e}")
     return inst_map, inst_num_map, futures_map, futures_num_map
 
+def _extract_tpex_otc_margin_from_openapi(headers):
+    """
+    動態解析櫃買中心官方 OpenAPI (tpex_mainboard_margin_balance) 的最新上櫃融資餘額總計（億元）。
+    自動偵測欄位名稱並印出首筆結構供 Log 確認。
+    """
+    result_map = {}
+    url_openapi = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
+    try:
+        res_api = requests.get(url_openapi, headers=headers, timeout=15)
+        if res_api.status_code == 200:
+            items = res_api.json()
+            if isinstance(items, list) and len(items) > 0:
+                print(f"TPEx OpenAPI 首筆欄位範例: {list(items[0].keys())}")
+                sum_by_date = {}
+                for it in items:
+                    # 1. 動態尋找日期欄位
+                    d_str = ""
+                    for k, v in it.items():
+                        if "date" in k.lower() or "日期" in k:
+                            d_str = str(v).strip()
+                            break
+                    if not d_str or len(d_str) < 6:
+                        continue
+
+                    # 2. 動態尋找今日融資餘額（張數或金額）與收盤價
+                    bal_val = None
+                    close_val = None
+                    for k, v in it.items():
+                        kl = k.lower()
+                        v_clean = str(v).replace(",", "").strip()
+                        try:
+                            num = float(v_clean)
+                        except ValueError:
+                            continue
+
+                        # 排除「前日餘額 (Previous/Pre)」，鎖定「今日融資餘額 (MarginPurchaseBalance / Balance)」
+                        if ("margin" in kl and "balance" in kl and "prev" not in kl and "pre" not in kl) or ("融資餘額" in k and "前" not in k):
+                            bal_val = num
+                        elif ("close" in kl and "prev" not in kl) or ("收盤" in k):
+                            close_val = num
+
+                    if bal_val is not None and bal_val > 0:
+                        m_d = f"{int(d_str[-4:-2]):02d}/{int(d_str[-2:]):02d}"
+                        # 若有收盤價且餘額為張數（通常單檔 < 50 萬張），以 張數 * 1000股 * 收盤價 換算億元
+                        if close_val is not None and close_val > 0 and bal_val < 500000:
+                            sum_by_date[m_d] = sum_by_date.get(m_d, 0.0) + (bal_val * 1000.0 * close_val) / 100000000.0
+                        else:
+                            # 若已是仟元直接除以 100000 換算億元
+                            sum_by_date[m_d] = sum_by_date.get(m_d, 0.0) + (bal_val / 100000.0)
+
+                for m_d, tot_b in sum_by_date.items():
+                    if 300 <= tot_b <= 5000:
+                        result_map[m_d] = round(tot_b, 1)
+                        print(f"TPEx OpenAPI 成功計算上櫃融資餘額 [{m_d}]: {result_map[m_d]} 億")
+    except Exception as e:
+        print(f"TPEx OpenAPI 解析異常: {e}")
+    return result_map
+
+def _fetch_tpex_daily_margin_web(target_date, headers):
+    """
+    備援通道：直接向櫃買中心官方新版網頁報表端點查询指定日期的全市場上櫃融資餘額總計（億元）
+    """
+    m_d = f"{target_date.month:02d}/{target_date.day:02d}"
+    d_west = target_date.strftime("%Y/%m/%d")
+    roc_y = target_date.year - 1911
+    d_roc = f"{roc_y}/{target_date.month:02d}/{target_date.day:02d}"
+
+    candidate_urls = [
+        f"https://www.tpex.org.tw/www/zh-tw/margin/balance?date={d_west}&id=&response=json",
+        f"https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d={d_roc}"
+    ]
+    req_h = dict(headers)
+    req_h["Referer"] = "https://www.tpex.org.tw/zh-tw/mainboard/trading/margin-trading/transactions.html"
+
+    for u in candidate_urls:
+        try:
+            res = requests.get(u, headers=req_h, timeout=10)
+            if res.status_code == 200 and res.text.strip().startswith("{"):
+                j = res.json()
+                tables = j.get("tables", [])
+                for tbl in tables:
+                    # 尋找合計列（通常在 summary 或 tfoot 或 data 最後幾列）
+                    rows_to_check = tbl.get("summary", []) + tbl.get("tfoot", []) + tbl.get("data", [])[-3:]
+                    for row in rows_to_check:
+                        row_str = "".join([str(c) for c in row])
+                        if "合計" in row_str or "總計" in row_str or len(rows_to_check) <= 3:
+                            big_nums = []
+                            for c in row:
+                                c_clean = str(c).replace(",", "").strip()
+                                if c_clean.isdigit() and int(c_clean) > 10000000:
+                                    big_nums.append(int(c_clean))
+                            if big_nums:
+                                # 取最大的金額欄位（融資餘額仟元）換算億元
+                                otc_b = round(max(big_nums) / 100000.0, 1)
+                                if 300 <= otc_b <= 5000:
+                                    print(f"櫃買中心官方報表補齊上櫃融資 [{m_d}]: {otc_b} 億")
+                                    return otc_b
+        except Exception:
+            continue
+    return None
+
 def get_margin_balance_5days():
     """
     抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）：
     - 上市：HiStock (m=mg) 精準讀取融資餘額(億)
-    - 上櫃：櫃買中心官方 Swagger OpenAPI (tpex_mainboard_margin_balance) 計算全市場總額，
-            並自動累積儲存於 charts/otc_margin_history.json，同時搭配 HiStock / 玩股網補齊歷史缺口。
+    - 上櫃：TPEx OpenAPI 動態計算全市場總額 + 櫃買中心官方報表補齊前 4 日 + 本地歷史累積快取
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -340,7 +440,6 @@ def get_margin_balance_5days():
     otc_margin = {}
     days_order = []
 
-    # 讀取本地已累積的上櫃融資歷史紀錄
     os.makedirs("charts", exist_ok=True)
     if os.path.exists(OTC_HISTORY_FILE):
         try:
@@ -384,72 +483,23 @@ def get_margin_balance_5days():
     today_md = f"{datetime.date.today().month:02d}/{datetime.date.today().day:02d}"
     filtered_days = [d for d in days_order if d != today_md][:5]
 
-    # 2. 上櫃融資餘額通道 1：櫃買中心官方 OpenAPI (https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance)
-    try:
-        url_openapi = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
-        res_api = requests.get(url_openapi, headers=headers, timeout=15)
-        if res_api.status_code == 200:
-            items = res_api.json()
-            sum_by_date = {}
-            for it in items:
-                d_str = str(it.get("Date", "")).strip()
-                # 支援多種可能欄位命名（融資餘額張數 * 收盤價 或 融資餘額金額）
-                bal_str = str(
-                    it.get("MarginPurchaseBalance")
-                    or it.get("MarginBalance")
-                    or it.get("融資餘額")
-                    or "0"
-                ).replace(",", "").strip()
-                close_str = str(it.get("Close") or it.get("收盤價") or "0").replace(",", "").strip()
+    # 2. 上櫃融資餘額通道 1：櫃買中心官方 OpenAPI 動態解析最新交易日
+    openapi_res = _extract_tpex_otc_margin_from_openapi(headers)
+    otc_margin.update(openapi_res)
 
-                if len(d_str) >= 6:
-                    m_d = f"{int(d_str[-4:-2]):02d}/{int(d_str[-2:]):02d}"
-                    try:
-                        bal_num = float(bal_str)
-                        close_num = float(close_str)
-                        # 若為張數（搭配收盤價計算金額元 -> 億元）；若已是金額仟元則直接換算
-                        if close_num > 0 and bal_num < 500000:
-                            sum_by_date[m_d] = sum_by_date.get(m_d, 0.0) + (bal_num * 1000.0 * close_num) / 100000000.0
-                        else:
-                            sum_by_date[m_d] = sum_by_date.get(m_d, 0.0) + (bal_num / 100000.0)
-                    except ValueError:
-                        continue
-
-            for m_d, tot_b in sum_by_date.items():
-                if 300 <= tot_b <= 5000:
-                    otc_margin[m_d] = round(tot_b, 1)
-                    print(f"TPEx OpenAPI 取得上櫃融資餘額 [{m_d}]: {otc_margin[m_d]} 億")
-    except Exception as e:
-        print(f"櫃買中心 OpenAPI 上櫃融資抓取異常: {e}")
-
-    # 3. 上櫃融資餘額通道 2：HiStock (m=otcmg) 補齊尚未累積的前幾日歷史數據
-    if any(d not in otc_margin for d in filtered_days):
-        try:
-            url_otc = "https://histock.tw/stock/three.aspx?m=otcmg"
-            res_otc = requests.get(url_otc, headers=headers, timeout=12)
-            if res_otc.status_code == 200:
-                soup = BeautifulSoup(res_otc.text, "html.parser")
-                for tbl in soup.find_all("table"):
-                    if "融資餘額" in tbl.get_text():
-                        for row in tbl.find_all("tr")[1:]:
-                            tds = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                            if len(tds) >= 2:
-                                m_date = re.search(r'(\d{1,2})[/-](\d{1,2})', tds[0])
-                                if m_date:
-                                    m_d = f"{int(m_date.group(1)):02d}/{int(m_date.group(2)):02d}"
-                                    if m_d in otc_margin:
-                                        continue
-                                    clean_v = tds[1].replace(",", "").replace("億", "").strip()
-                                    try:
-                                        v_f = float(clean_v)
-                                        if 300 <= v_f <= 5000:
-                                            otc_margin[m_d] = round(v_f, 1)
-                                    except ValueError:
-                                        pass
-                        if otc_margin:
-                            break
-        except Exception as e:
-            print(f"HiStock 上櫃融資備援異常: {e}")
+    # 3. 上櫃融資餘額通道 2：針對尚未累積到的歷史日期，向櫃買中心官方報表逐日查詢補齊
+    today = datetime.date.today()
+    for d_str in filtered_days:
+        if d_str not in otc_margin:
+            try:
+                m_int, d_int = map(int, d_str.split("/"))
+                y_int = today.year if m_int <= today.month else today.year - 1
+                t_date = datetime.date(y_int, m_int, d_int)
+                fetched_val = _fetch_tpex_daily_margin_web(t_date, headers)
+                if fetched_val is not None:
+                    otc_margin[d_str] = fetched_val
+            except Exception as e:
+                print(f"日期 {d_str} 補齊上櫃融資異常: {e}")
 
     # 將最新累積的上櫃融資餘額存回本地 JSON（保留最近 15 筆）
     if otc_margin:
@@ -460,7 +510,7 @@ def get_margin_balance_5days():
         except Exception as e:
             print(f"寫入上櫃歷史快取異常: {e}")
 
-    print(f"融資餘額結果 -> 日期:{filtered_days}, 上市:{tse_margin}, 上櫃:{otc_margin}")
+    print(f"融資餘額最終結果 -> 日期:{filtered_days}, 上市:{tse_margin}, 上櫃:{otc_margin}")
     return filtered_days, tse_margin, otc_margin
 
 def draw_card_box(fig, x, y, w, h, title, bg_color="#FFFFFF", header_color="#007A99"):
@@ -668,11 +718,11 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
         if o_v > 0:
             if o_v > max_total * 0.11:
                 ax6.text(t_v + o_v / 2, i, f"上櫃 {o_v:,.1f}", va="center", ha="center", color="#FFFFFF", fontsize=9.0, fontweight="bold")
-                ax6.text(tot_v + max_total * 0.012, i, f"總計 {tot_v:,.1f}", va="center", ha="left", color=TEXT_DARK, fontsize=9.2, fontweight="bold")
+                ax6.text(tot_v + max_total * 0.012, i, f"總計 {tot_v:,.1f}", va="center", ha="left", color=TEXT_DARK, fontsize=9.5, fontweight="bold")
             else:
-                ax6.text(tot_v + max_total * 0.012, i, f"上櫃 {o_v:,.1f} (總計 {tot_v:,.1f})", va="center", ha="left", color=TEXT_DARK, fontsize=9.2, fontweight="bold")
+                ax6.text(tot_v + max_total * 0.012, i, f"上櫃 {o_v:,.1f} (總計 {tot_v:,.1f})", va="center", ha="left", color=TEXT_DARK, fontsize=9.5, fontweight="bold")
         elif tot_v > 0:
-            ax6.text(tot_v + max_total * 0.012, i, f"總計 {tot_v:,.1f}", va="center", ha="left", color=TEXT_DARK, fontsize=9.2, fontweight="bold")
+            ax6.text(tot_v + max_total * 0.012, i, f"總計 {tot_v:,.1f}", va="center", ha="left", color=TEXT_DARK, fontsize=9.5, fontweight="bold")
 
     fig.text(0.5, 0.022, "───────   掌握市場動態 · 從容應對變化   ───────", fontsize=12, fontweight="bold", color=HEADER_TEAL, va="center", ha="center")
 
