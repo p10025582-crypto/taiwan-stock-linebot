@@ -2,8 +2,8 @@ name: Daily Taiwan Stock Report
 
 on:
   schedule:
-    # 每日台灣時間 17:55 執行 (UTC 09:55)
-    - cron: '55 9 * * 1-5'
+    # 每日台灣時間 18:03 執行 (UTC 10:03，避開整點排程尖峰)
+    - cron: '3 10 * * 1-5'
   workflow_dispatch:
 
 permissions:
