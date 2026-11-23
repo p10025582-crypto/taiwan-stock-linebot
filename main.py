@@ -14,12 +14,27 @@ import numpy as np
 
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
+GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 CACHE_FILE = "charts/payload_cache.json"
 OTC_HISTORY_FILE = "charts/otc_margin_history.json"
 
+def get_tw_now():
+    """取得台灣時間 (UTC+8)"""
+    tz_tw = datetime.timezone(datetime.timedelta(hours=8))
+    return datetime.datetime.now(tz_tw)
+
+def is_schedule_delayed_to_morning():
+    """若為自動排程觸發，且因 GitHub 塞車延遲到隔天台灣時間 00:00~14:30 才啟動，則取消執行避免誤發舊報表"""
+    if GITHUB_EVENT_NAME == "schedule":
+        now_tw = get_tw_now()
+        if now_tw.hour < 14 or (now_tw.hour == 14 and now_tw.minute < 30):
+            print(f"偵測到自動排程嚴重延遲至台灣時間 {now_tw.strftime('%Y/%m/%d %H:%M')}，取消推播以免誤發舊資料。")
+            return True
+    return False
+
 def is_trading_day():
     """向證交所官方 FMTQIK 報表確認今天是否有實際開盤交易"""
-    today = datetime.date.today()
+    today = get_tw_now().date()
     date_str = today.strftime("%Y%m%d")
     roc_year = today.year - 1911
     today_roc_str = f"{roc_year}/{today.month:02d}/{today.day:02d}"
@@ -65,7 +80,7 @@ def send_line_broadcast(text, image_url=None):
 
 def get_twse_market_data_and_bias():
     """抓取大盤成交量與近 5 日 5MA 乖離率（具備跨月份自動拼接功能）"""
-    today = datetime.date.today()
+    today = get_tw_now().date()
     date_str = today.strftime("%Y%m%d")
     headers = {"User-Agent": "Mozilla/5.0"}
     turnover_map = {}
@@ -145,7 +160,7 @@ def get_twse_market_data_and_bias():
 
 def get_taifex_fx_rate_5days():
     """抓取近 5 日新台幣/美元匯率及漲跌（央行優先、期交所次之、Yahoo Finance 殿後）"""
-    today = datetime.date.today()
+    today = get_tw_now().date()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
@@ -400,10 +415,8 @@ def _extract_tpex_otc_margin_from_openapi(headers):
 
                     m_d = f"{int(d_str[-4:-2]):02d}/{int(d_str[-2:]):02d}"
                     if close_val is not None and close_val > 0 and bal_val < 500000:
-                        # 融資餘額(張) * 1000股 * 收盤價(元) / 1億
                         sum_by_date[m_d] = sum_by_date.get(m_d, 0.0) + (bal_val * 1000.0 * close_val) / 100000000.0
                     else:
-                        # 若已是金額(仟元)則除以 100000 換算億元
                         sum_by_date[m_d] = sum_by_date.get(m_d, 0.0) + (bal_val / 100000.0)
 
                 for m_d, tot_b in sum_by_date.items():
@@ -470,7 +483,6 @@ def get_margin_balance_5days():
     otc_margin = {}
     days_order = []
 
-    # 第一順位：讀取本地歷史快取
     os.makedirs("charts", exist_ok=True)
     if os.path.exists(OTC_HISTORY_FILE):
         try:
@@ -481,7 +493,6 @@ def get_margin_balance_5days():
         except Exception as e:
             print(f"讀取上櫃歷史快取異常: {e}")
 
-    # 上市融資餘額 (HiStock m=mg，防呆門檻 >= 1000 億)
     try:
         url_tse = "https://histock.tw/stock/three.aspx?m=mg"
         res_tse = requests.get(url_tse, headers=headers, timeout=12)
@@ -511,15 +522,13 @@ def get_margin_balance_5days():
     except Exception as e:
         print(f"上市融資餘額抓取異常: {e}")
 
-    today_md = f"{datetime.date.today().month:02d}/{datetime.date.today().day:02d}"
+    today = get_tw_now().date()
+    today_md = f"{today.month:02d}/{today.day:02d}"
     filtered_days = [d for d in days_order if d != today_md][:5]
 
-    # 第二順位：櫃買中心官方 OpenAPI 動態計算最新交易日並更新
     openapi_res = _extract_tpex_otc_margin_from_openapi(headers)
     otc_margin.update(openapi_res)
 
-    # 第三順位：針對尚未累積到的歷史日期，向櫃買中心官方報表逐日查詢補齊
-    today = datetime.date.today()
     for d_str in filtered_days:
         if d_str not in otc_margin:
             try:
@@ -532,7 +541,6 @@ def get_margin_balance_5days():
             except Exception as e:
                 print(f"日期 {d_str} 補齊上櫃融資異常: {e}")
 
-    # 第四順位：將最新累積的上櫃融資餘額存回本地 JSON（保留最近 15 筆）
     if otc_margin:
         try:
             trimmed = dict(list(otc_margin.items())[-15:])
@@ -602,7 +610,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
 
     fig = plt.figure(figsize=(10, 12.6), dpi=130, facecolor=BG_ICE)
 
-    today_str = datetime.date.today().strftime("%Y/%m/%d")
+    today_str = get_tw_now().strftime("%Y/%m/%d")
     title_badge = FancyBboxPatch(
         (0.04, 0.938), 0.012, 0.030,
         boxstyle="round,pad=0,rounding_size=0.004",
@@ -775,7 +783,7 @@ def is_pure_stock(code, name):
     return True
 
 def get_tse_market_rankings():
-    today_str = datetime.date.today().strftime("%Y%m%d")
+    today_str = get_tw_now().strftime("%Y%m%d")
     url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={today_str}&selectType=ALL&response=json"
     headers = {"User-Agent": "Mozilla/5.0"}
     buy_top10, sell_top10 = [], []
@@ -805,7 +813,7 @@ def get_tse_market_rankings():
 
 def get_otc_market_rankings():
     """櫃買中心上櫃三大法人合計買超/賣超（含跨網域三層備援與全例外防禦）"""
-    today = datetime.date.today()
+    today = get_tw_now().date()
     roc_year = today.year - 1911
     d_query = f"{roc_year}/{today.month:02d}/{today.day:02d}"
     
@@ -915,7 +923,7 @@ def get_otc_market_rankings():
 
 def prepare_data_and_chart():
     """Step 1：抓取全市場數據、繪製冰藍戰情圖表，並將文字內容暫存至本地快取檔"""
-    today_str = datetime.date.today().strftime("%Y/%m/%d")
+    today_str = get_tw_now().strftime("%Y/%m/%d")
     twse_map, twse_days_list, bias_map, bias_num_map = get_twse_market_data_and_bias()
     fx_map, fx_raw_map = get_taifex_fx_rate_5days()
     inst_map, inst_num_map, futures_map, futures_num_map = get_histock_three_and_futures_5days()
@@ -994,7 +1002,7 @@ def prepare_data_and_chart():
 def send_cached_broadcast():
     """Step 3：確認圖片已 Push 上 GitHub CDN 後，讀取快取並單次發送 LINE 圖文推播"""
     if not os.path.exists(CACHE_FILE):
-        print("找不到推播快取檔（可能為休市日已略過），結束執行。")
+        print("找不到推播快取檔（可能為休市日或排程逾時已略過），結束執行。")
         return
 
     with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -1008,15 +1016,21 @@ if __name__ == "__main__":
         mode = sys.argv[1] if len(sys.argv) > 1 else "--all"
 
         if mode == "--prepare":
+            if is_schedule_delayed_to_morning():
+                sys.exit(0)
             if not is_trading_day():
                 print("今日為休市日（國定假日或颱風假），取消推播。")
                 sys.exit(0)
             prepare_data_and_chart()
 
         elif mode == "--send":
+            if is_schedule_delayed_to_morning():
+                sys.exit(0)
             send_cached_broadcast()
 
         else:
+            if is_schedule_delayed_to_morning():
+                sys.exit(0)
             if not is_trading_day():
                 print("今日為休市日（國定假日或颱風假），取消推播。")
                 sys.exit(0)
