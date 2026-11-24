@@ -17,19 +17,34 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 CACHE_FILE = "charts/payload_cache.json"
 OTC_HISTORY_FILE = "charts/otc_margin_history.json"
+SENT_LOG_FILE = "charts/last_sent_date.txt"
 
 def get_tw_now():
     """取得台灣時間 (UTC+8)"""
     tz_tw = datetime.timezone(datetime.timedelta(hours=8))
     return datetime.datetime.now(tz_tw)
 
-def is_schedule_delayed_to_morning():
-    """若為自動排程觸發，且因 GitHub 塞車延遲到隔天台灣時間 00:00~14:30 才啟動，則取消執行避免誤發舊報表"""
+def is_schedule_blocked():
+    """
+    自動排程防呆檢查：
+    1. 若延遲到隔天台灣時間 00:00~14:30 才啟動，取消執行避免誤發舊報表
+    2. 若今日自動排程已經成功推播過，則第二順位備援排程自動跳過，絕不重複發送
+    （手動點擊 Run workflow 不受此限制）
+    """
     if GITHUB_EVENT_NAME == "schedule":
         now_tw = get_tw_now()
         if now_tw.hour < 14 or (now_tw.hour == 14 and now_tw.minute < 30):
-            print(f"偵測到自動排程嚴重延遲至台灣時間 {now_tw.strftime('%Y/%m/%d %H:%M')}，取消推播以免誤發舊資料。")
+            print(f"自動排程延遲至台灣時間 {now_tw.strftime('%Y/%m/%d %H:%M')}，取消推播以免誤發舊資料。")
             return True
+        today_str = now_tw.strftime("%Y/%m/%d")
+        if os.path.exists(SENT_LOG_FILE):
+            try:
+                with open(SENT_LOG_FILE, "r", encoding="utf-8") as f:
+                    if f.read().strip() == today_str:
+                        print(f"今日 ({today_str}) 已完成自動推播，備援排程自動略過。")
+                        return True
+            except Exception:
+                pass
     return False
 
 def is_trading_day():
@@ -56,7 +71,7 @@ def send_line_broadcast(text, image_url=None):
     """透過單次 LINE Broadcast API 呼叫同時發送圖片與文字（僅計為 1 次推播）"""
     if not LINE_ACCESS_TOKEN:
         print("未設定 LINE 金鑰 (LINE_CHANNEL_ACCESS_TOKEN)")
-        return
+        return False
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
@@ -75,8 +90,10 @@ def send_line_broadcast(text, image_url=None):
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         print(f"LINE 廣播推播狀態: {resp.status_code}")
+        return resp.status_code == 200
     except Exception as e:
         print(f"LINE 發送異常: {e}")
+        return False
 
 def get_twse_market_data_and_bias():
     """抓取大盤成交量與近 5 日 5MA 乖離率（具備跨月份自動拼接功能）"""
@@ -371,7 +388,7 @@ def _get_tpex_close_price_map(headers):
 def _extract_tpex_otc_margin_from_openapi(headers):
     """
     動態解析櫃買中心官方 OpenAPI (tpex_mainboard_margin_balance) 的最新上櫃融資餘額總計（億元）。
-    結合每日收盤行情 OpenAPI 的收盤價與融資餘額張數相乘加總，防呆門檻設為 >= 300 億。
+    支援「資餘額」/「TodayBalance」欄位簡稱，並結合每日收盤行情 OpenAPI 相乘加總。
     """
     result_map = {}
     url_openapi = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
@@ -396,7 +413,11 @@ def _extract_tpex_otc_margin_from_openapi(headers):
                             d_str = v_str
                         elif "code" in kl or "代號" in k:
                             code = v_str
-                        elif ("margin" in kl and "balance" in kl and "prev" not in kl and "pre" not in kl) or ("融資餘額" in k and "前" not in k):
+                        elif (
+                            ("balance" in kl and "prev" not in kl and "pre" not in kl and "short" not in kl and "融券" not in k)
+                            or ("資餘額" in k and "前" not in k)
+                            or ("融資餘額" in k and "前" not in k)
+                        ):
                             try:
                                 bal_val = float(v_str.replace(",", ""))
                             except ValueError:
@@ -429,43 +450,54 @@ def _extract_tpex_otc_margin_from_openapi(headers):
 
 def _fetch_tpex_daily_margin_web(target_date, headers):
     """
-    備援通道：直接向櫃買中心官方新版網頁報表端點查詢指定日期的全市場上櫃融資餘額總計（億元）
+    備援通道：以 POST 請求向櫃買中心官方新版網頁報表端點查詢指定日期的全市場上櫃融資餘額總計（億元）
     """
     m_d = f"{target_date.month:02d}/{target_date.day:02d}"
     d_west = target_date.strftime("%Y/%m/%d")
     roc_y = target_date.year - 1911
     d_roc = f"{roc_y}/{target_date.month:02d}/{target_date.day:02d}"
 
-    candidate_urls = [
-        f"https://www.tpex.org.tw/www/zh-tw/margin/balance?date={d_west}&id=&response=json",
-        f"https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d={d_roc}"
-    ]
     req_h = dict(headers)
     req_h["Referer"] = "https://www.tpex.org.tw/zh-tw/mainboard/trading/margin-trading/transactions.html"
 
-    for u in candidate_urls:
-        try:
-            res = requests.get(u, headers=req_h, timeout=10)
-            if res.status_code == 200 and res.text.strip().startswith("{"):
-                j = res.json()
-                tables = j.get("tables", [])
-                for tbl in tables:
-                    rows_to_check = tbl.get("summary", []) + tbl.get("tfoot", []) + tbl.get("data", [])[-3:]
-                    for row in rows_to_check:
-                        row_str = "".join([str(c) for c in row])
-                        if "合計" in row_str or "總計" in row_str or len(rows_to_check) <= 3:
-                            big_nums = []
-                            for c in row:
-                                c_clean = str(c).replace(",", "").strip()
-                                if c_clean.isdigit() and int(c_clean) > 10000000:
-                                    big_nums.append(int(c_clean))
-                            if big_nums:
-                                otc_b = round(max(big_nums) / 100000.0, 1)
-                                if otc_b >= 300:
-                                    print(f"櫃買中心官方報表補齊上櫃融資 [{m_d}]: {otc_b} 億")
-                                    return otc_b
-        except Exception:
-            continue
+    # 1. 新版官網 POST API
+    try:
+        url_post = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
+        res = requests.post(url_post, data={"date": d_west, "id": "", "response": "json"}, headers=req_h, timeout=12)
+        if res.status_code == 200 and res.text.strip().startswith("{"):
+            j = res.json()
+            for tbl in j.get("tables", []):
+                rows_to_check = tbl.get("summary", []) + tbl.get("tfoot", []) + tbl.get("data", [])[-3:]
+                for row in rows_to_check:
+                    big_nums = []
+                    for c in row:
+                        c_clean = str(c).replace(",", "").strip()
+                        if c_clean.isdigit() and int(c_clean) > 10000000:
+                            big_nums.append(int(c_clean))
+                    if big_nums:
+                        otc_b = round(max(big_nums) / 100000.0, 1)
+                        if otc_b >= 300:
+                            print(f"櫃買中心官網 POST 報表補齊上櫃融資 [{m_d}]: {otc_b} 億")
+                            return otc_b
+    except Exception as e:
+        print(f"櫃買中心 POST 查詢 [{m_d}] 異常: {e}")
+
+    # 2. 舊版 JSON 端點備援
+    try:
+        url_old = f"https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d={d_roc}"
+        res2 = requests.get(url_old, headers=req_h, timeout=12)
+        if res2.status_code == 200 and res2.text.strip().startswith("{"):
+            j2 = res2.json()
+            for row in j2.get("aaData", [])[-3:]:
+                big_nums = [int(str(c).replace(",", "").strip()) for c in row if str(c).replace(",", "").strip().isdigit() and int(str(c).replace(",", "").strip()) > 10000000]
+                if big_nums:
+                    otc_b = round(max(big_nums) / 100000.0, 1)
+                    if otc_b >= 300:
+                        print(f"櫃買中心舊版端點補齊上櫃融資 [{m_d}]: {otc_b} 億")
+                        return otc_b
+    except Exception:
+        pass
+
     return None
 
 def get_margin_balance_5days():
@@ -473,7 +505,7 @@ def get_margin_balance_5days():
     抓取近 5 日上市及上櫃融資餘額（前一日基準，單位：億元）：
     - 第一順位：讀取本地歷史累積快取 charts/otc_margin_history.json
     - 第二順位：向櫃買中心官方 OpenAPI 抓取最新交易日全市場上櫃融資總額並更新
-    - 第三順位：若近 5 日尚有缺漏日期，向櫃買中心官方網頁報表逐日補齊
+    - 第三順位：若近 5 日尚有缺漏日期，向櫃買中心官方網頁報表（POST）逐日補齊
     - 第四順位：將最新結果寫回 charts/otc_margin_history.json 滾動保存（保留近 15 筆）
     """
     headers = {
@@ -1009,14 +1041,17 @@ def send_cached_broadcast():
         payload = json.load(f)
 
     time.sleep(3)
-    send_line_broadcast(payload["text"], payload.get("image_url"))
+    if send_line_broadcast(payload["text"], payload.get("image_url")):
+        today_str = get_tw_now().strftime("%Y/%m/%d")
+        with open(SENT_LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(today_str)
 
 if __name__ == "__main__":
     try:
         mode = sys.argv[1] if len(sys.argv) > 1 else "--all"
 
         if mode == "--prepare":
-            if is_schedule_delayed_to_morning():
+            if is_schedule_blocked():
                 sys.exit(0)
             if not is_trading_day():
                 print("今日為休市日（國定假日或颱風假），取消推播。")
@@ -1024,12 +1059,12 @@ if __name__ == "__main__":
             prepare_data_and_chart()
 
         elif mode == "--send":
-            if is_schedule_delayed_to_morning():
+            if is_schedule_blocked():
                 sys.exit(0)
             send_cached_broadcast()
 
         else:
-            if is_schedule_delayed_to_morning():
+            if is_schedule_blocked():
                 sys.exit(0)
             if not is_trading_day():
                 print("今日為休市日（國定假日或颱風假），取消推播。")
