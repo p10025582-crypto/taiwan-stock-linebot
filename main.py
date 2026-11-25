@@ -320,7 +320,7 @@ def get_histock_three_and_futures_5days():
                             net_str = tds[-1].replace(",", "").strip()
                             try:
                                 net_float = float(net_str)
-                                inst_map[m_d] = f"{net_float:+.2f}億"
+                                inst_map[m_d] = f"{net_float:+,.2f}億"
                                 inst_num_map[m_d] = net_float
                             except ValueError:
                                 inst_map[m_d] = f"{net_str}億"
@@ -460,7 +460,6 @@ def _fetch_tpex_daily_margin_web(target_date, headers):
     req_h = dict(headers)
     req_h["Referer"] = "https://www.tpex.org.tw/zh-tw/mainboard/trading/margin-trading/transactions.html"
 
-    # 1. 新版官網 POST API
     try:
         url_post = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
         res = requests.post(url_post, data={"date": d_west, "id": "", "response": "json"}, headers=req_h, timeout=12)
@@ -482,7 +481,6 @@ def _fetch_tpex_daily_margin_web(target_date, headers):
     except Exception as e:
         print(f"櫃買中心 POST 查詢 [{m_d}] 異常: {e}")
 
-    # 2. 舊版 JSON 端點備援
     try:
         url_old = f"https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d={d_roc}"
         res2 = requests.get(url_old, headers=req_h, timeout=12)
@@ -710,7 +708,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     for bar, v in zip(bars1, vals1):
         ax1.text(v + max_v1 * 0.025, bar.get_y() + bar.get_height()/2, f"{v:,.1f}", va="center", ha="left", color=TEXT_DARK, fontsize=10, fontweight="bold")
 
-    # --- 2. 右上：近5日三大法人買賣超 ---
+    # --- 2. 右上：近5日三大法人買賣超（已加上千分位逗號） ---
     ax2 = create_inner_ax(right_x, y_row1, col_w, row_h)
     vals2 = [inst_num_map.get(d, 0) for d in days_rev]
     colors2 = [RED_BAR if v >= 0 else GREEN_BAR for v in vals2]
@@ -722,7 +720,7 @@ def generate_dashboard_chart(twse_days_list, turnover_map, inst_num_map, fx_raw_
     for bar, v in zip(bars2, vals2):
         offset = max_abs2 * 0.05 if v >= 0 else -max_abs2 * 0.05
         ha_align = "left" if v >= 0 else "right"
-        ax2.text(v + offset, bar.get_y() + bar.get_height()/2, f"{v:+.1f}", va="center", ha=ha_align, color=TEXT_DARK, fontsize=10, fontweight="bold")
+        ax2.text(v + offset, bar.get_y() + bar.get_height()/2, f"{v:+,.1f}", va="center", ha=ha_align, color=TEXT_DARK, fontsize=10, fontweight="bold")
 
     # --- 3. 第二層左：近5日新台幣/美元匯率 ---
     ax3 = create_inner_ax(left_x, y_row2, col_w, row_h)
@@ -984,7 +982,7 @@ def prepare_data_and_chart():
     for d in twse_days_list:
         turnover = twse_map.get(d, 0.0)
         inst_net = inst_map.get(d, "已結算")
-        msg += f"{d} 大盤:{turnover}億 | 法人:{inst_net}\n"
+        msg += f"{d} 大盤:{turnover:,.1f}億 | 法人:{inst_net}\n"
     msg += "─" * 22 + "\n\n"
 
     msg += "💵【近5日新台幣/美元匯率】\n"
