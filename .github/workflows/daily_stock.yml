@@ -1,11 +1,6 @@
 name: Daily Taiwan Stock Report
 
 on:
-  schedule:
-    # 第一順位：台灣時間 18:03 (UTC 10:03)
-    - cron: '3 10 * * 1-5'
-    # 第二順位備援：台灣時間 18:33 (UTC 10:33，若第一順位已推播則程式會自動跳過)
-    - cron: '33 10 * * 1-5'
   workflow_dispatch:
 
 permissions:
