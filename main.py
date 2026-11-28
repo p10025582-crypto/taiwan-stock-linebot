@@ -28,8 +28,7 @@ def is_schedule_blocked():
     """
     自動排程防呆檢查：
     1. 若延遲到隔天台灣時間 00:00~14:30 才啟動，取消執行避免誤發舊報表
-    2. 若今日自動排程已經成功推播過，則第二順位備援排程自動跳過，絕不重複發送
-    （手動點擊 Run workflow 或外部 API 觸發不受此限制）
+    2. 若今日自動排程已經成功推播過，則後續備援排程自動跳過，絕不重複發送
     """
     if GITHUB_EVENT_NAME == "schedule":
         now_tw = get_tw_now()
@@ -48,8 +47,13 @@ def is_schedule_blocked():
     return False
 
 def is_trading_day():
-    """向證交所官方 FMTQIK 報表確認今天是否有實際開盤交易"""
+    """向證交所官方 FMTQIK 報表確認今天是否有實際開盤交易（週末與 API 異常一律不推播）"""
     today = get_tw_now().date()
+    # 先直接排除週六(5)與週日(6)
+    if today.weekday() >= 5:
+        print("今日為週末休市日，取消推播。")
+        return False
+
     date_str = today.strftime("%Y%m%d")
     roc_year = today.year - 1911
     today_roc_str = f"{roc_year}/{today.month:02d}/{today.day:02d}"
@@ -63,8 +67,8 @@ def is_trading_day():
             if last_record_date == today_roc_str:
                 return True
     except Exception as e:
-        print(f"判斷開市狀態異常: {e}")
-        return True
+        print(f"判斷開市狀態異常（安全起見取消推播）: {e}")
+        return False
     return False
 
 def send_line_broadcast(text, image_url=None):
@@ -610,7 +614,6 @@ def get_margin_balance_5days():
     for idx, d_str in enumerate(filtered_days):
         prev_day_val = otc_margin.get(filtered_days[idx + 1]) if idx + 1 < len(filtered_days) else None
         curr_val = otc_margin.get(d_str)
-        # 若缺漏，或數值與前一日幾乎完全相同（疑似舊快取），主動向櫃買官網 POST 重新確認
         is_suspected_dup = (curr_val is not None and prev_day_val is not None and abs(curr_val - prev_day_val) < 0.2 and d_str not in direct_otc)
         if curr_val is None or is_suspected_dup:
             try:
